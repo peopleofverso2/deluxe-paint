@@ -309,6 +309,9 @@ export default function Editor() {
   const [playing, setPlaying] = useState(false);
   const [fps, setFps] = useState(6);
   const [looping, setLooping] = useState(true);
+  // Scratch / scrub mode (used during REC for "vinyl-style" playback control)
+  const [playDir, setPlayDir] = useState<1 | -1>(1);  // forward / reverse
+  const [playSpeed, setPlaySpeed] = useState<1 | 2 | 4>(1);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -324,6 +327,8 @@ export default function Editor() {
   const frameCountRef = useRef(1);
   const fpsRef = useRef(fps);
   const loopingRef = useRef(looping);
+  const playDirRef = useRef<1 | -1>(1);
+  const playSpeedRef = useRef<1 | 2 | 4>(1);
 
   // Video recording (magnétoscope)
   const [recording, setRecording] = useState(false);
@@ -338,6 +343,8 @@ export default function Editor() {
   useEffect(() => { frameCountRef.current = frameCount; }, [frameCount]);
   useEffect(() => { fpsRef.current = fps; }, [fps]);
   useEffect(() => { loopingRef.current = looping; }, [looping]);
+  useEffect(() => { playDirRef.current = playDir; }, [playDir]);
+  useEffect(() => { playSpeedRef.current = playSpeed; }, [playSpeed]);
 
   // Initialize canvas
   useEffect(() => {
@@ -455,18 +462,26 @@ export default function Editor() {
     saveCurrentFrame();
     setPlaying(true);
     let f = currentFrameRef.current;
-    playIntervalRef.current = setInterval(() => {
+    const tick = () => {
       // Persist any live edits made on the current frame before advancing
       saveCurrentFrame();
-      f = (f + 1) % frameCountRef.current;
-      if (!loopingRef.current && f === 0) {
-        stopPlayback();
-        return;
+      const n = frameCountRef.current;
+      const dir = playDirRef.current;
+      const next = (f + dir + n) % n;
+      // Non-looping mode: stop when we wrap past the boundary
+      if (!loopingRef.current) {
+        if ((dir > 0 && next === 0) || (dir < 0 && next === n - 1)) {
+          stopPlayback();
+          return;
+        }
       }
+      f = next;
       currentFrameRef.current = f;
       setCurrentFrame(f);
       loadFrame(f);
-    }, 1000 / fpsRef.current);
+    };
+    const interval = Math.max(20, 1000 / (fpsRef.current * playSpeedRef.current));
+    playIntervalRef.current = setInterval(tick, interval);
   }
 
   function stopPlayback() {
@@ -478,12 +493,13 @@ export default function Editor() {
     setPlaying(false);
   }
 
-  // Restart playback when fps changes
+  // Restart playback when fps / direction / speed change so the interval picks up the new rate
   useEffect(() => {
     if (playing) {
       startPlayback();
     }
-  }, [fps]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fps, playDir, playSpeed]);
 
   // Video recording (magnétoscope) - records the canvas in real-time
   function startRecording() {
@@ -1234,6 +1250,51 @@ export default function Editor() {
           </div>
         </div>
       )}
+
+      {/* SCRATCH / SCRUB PANEL — drag the slider to "scratch" the animation;
+          if REC is on, this scratching is baked into the recorded video. */}
+      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: "2px solid #000", padding: "4px 8px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: "#000", fontSize: 14, fontWeight: "bold", minWidth: 70 }}>SCRATCH :</span>
+          <button
+            className="amiga-button"
+            onClick={() => setPlayDir(playDir === 1 ? -1 : 1)}
+            data-active={playDir === -1}
+            title="SENS DE LECTURE — INVERSER"
+            style={{ padding: "2px 8px", color: "#000", minWidth: 56 }}
+          >
+            {playDir === -1 ? "◀◀ REV" : "▶▶ FWD"}
+          </button>
+          {([1, 2, 4] as const).map(s => (
+            <button
+              key={s}
+              className="amiga-button"
+              onClick={() => setPlaySpeed(s)}
+              data-active={playSpeed === s}
+              title={`VITESSE ×${s}`}
+              style={{ padding: "2px 6px", color: "#000", minWidth: 28 }}
+            >
+              {s}×
+            </button>
+          ))}
+          <input
+            type="range"
+            min={0}
+            max={Math.max(0, frameCount - 1)}
+            value={currentFrame}
+            step={1}
+            onMouseDown={() => { if (playing) stopPlayback(); }}
+            onTouchStart={() => { if (playing) stopPlayback(); }}
+            onChange={e => switchToFrame(Number(e.target.value))}
+            style={{ flex: 1, minWidth: 100, cursor: "grab", accentColor: "#191919" }}
+            title="GLISSE POUR SCRATCHER L'ANIMATION (CAPTURÉ PAR REC)"
+            disabled={frameCount < 2}
+          />
+          <span style={{ color: "#000", fontSize: 12, minWidth: 80, fontVariantNumeric: "tabular-nums" }}>
+            {String(currentFrame + 1).padStart(3, "0")} / {String(frameCount).padStart(3, "0")}
+          </span>
+        </div>
+      </div>
 
       {/* ANIMATION PANEL */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: "2px solid #000", padding: "4px 8px" }}>
