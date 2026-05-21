@@ -975,10 +975,10 @@ export default function Editor() {
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden", background: "#0055AA", fontFamily: "'VT323', monospace", fontSize: 16 }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden", background: "#F0EFED", fontFamily: "'VT323', monospace", fontSize: 16, color: "#000" }}>
 
       {/* MENUBAR */}
-      <div style={{ display: "flex", alignItems: "center", background: "#0055AA", borderBottom: "2px solid #000", padding: "0 4px", flexShrink: 0, height: 28 }}>
+      <div style={{ display: "flex", alignItems: "center", background: "#191919", borderBottom: "2px solid #000", padding: "0 4px", flexShrink: 0, height: 28 }}>
         <MenuDropdown label="IMAGE" items={[
           { label: "NOUVEAU", action: handleNew },
           { label: "SAUVER FRAME (PNG)", action: handleSave },
@@ -1019,8 +1019,8 @@ export default function Editor() {
         >
           {aliased ? "ALIAS ON" : "ALIAS OFF"}
         </button>
-        <div style={{ marginLeft: "auto", color: "#FFF", fontSize: 14, paddingRight: 8 }}>
-          DELUXE PAINT — AMIGA
+        <div style={{ marginLeft: "auto", color: "#F0EFED", fontSize: 14, paddingRight: 8, letterSpacing: 1 }}>
+          DELUXE PAINT · PEOPLE OF VERSO
         </div>
       </div>
 
@@ -1067,7 +1067,7 @@ export default function Editor() {
         </div>
 
         {/* CANVAS AREA */}
-        <div ref={canvasAreaRef} style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", background: "#222", position: "relative" }}>
+        <div ref={canvasAreaRef} style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", background: "#191919", position: "relative" }}>
           <div style={{ position: "relative", margin: 16, display: "inline-block" }}>
             <canvas
               ref={canvasRef}

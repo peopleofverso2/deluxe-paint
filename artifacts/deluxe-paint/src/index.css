@@ -17,16 +17,18 @@
 }
 
 :root {
-  --background: 210 100% 33%; /* #0055AA */
-  --foreground: 0 0% 100%;
-  
-  --panel: 0 0% 66%; /* #AAAAAA */
+  /* People of Verso — minimal black on cream. The "chrome" (menubar,
+     panels, status bar) is brand-styled; the canvas stays raw pixel-art. */
+  --background: 36 14% 93%;  /* #F0EFED — cream brand bg */
+  --foreground: 0 0% 0%;
+
+  --panel: 0 0% 100%;        /* white panels */
   --panel-text: 0 0% 0%;
-  --panel-border-light: 0 0% 100%;
+  --panel-border-light: 36 14% 96%;
   --panel-border-dark: 0 0% 0%;
 
-  --primary: 36 100% 50%; /* Orange */
-  --primary-foreground: 0 0% 0%;
+  --primary: 0 0% 10%;       /* #191919 — near-black accent */
+  --primary-foreground: 36 14% 93%;
 
   --app-font-mono: 'VT323', monospace;
   --radius: 0px;
