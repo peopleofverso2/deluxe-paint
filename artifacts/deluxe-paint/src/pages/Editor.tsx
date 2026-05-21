@@ -229,6 +229,15 @@ export default function Editor() {
     };
   }
 
+  function getTouchCoords(touch: Touch): { x: number; y: number } {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: Math.floor((touch.clientX - rect.left) / zoom),
+      y: Math.floor((touch.clientY - rect.top) / zoom),
+    };
+  }
+
   // Save current canvas into framesData
   function saveCurrentFrame() {
     const ctx = getCtx();
@@ -416,6 +425,123 @@ export default function Editor() {
 
   const onMouseLeave = useCallback(() => {
     setMousePos(null);
+  }, []);
+
+  // Touch events — attached imperatively so we can use passive:false
+  const toolRef = useRef(tool);
+  const fgColorRef = useRef(fgColor);
+  const bgColorRef = useRef(bgColor);
+  const brushSizeRef = useRef(brushSize);
+  const zoomRef = useRef(zoom);
+  const playingRef = useRef(playing);
+
+  useEffect(() => { toolRef.current = tool; }, [tool]);
+  useEffect(() => { fgColorRef.current = fgColor; }, [fgColor]);
+  useEffect(() => { bgColorRef.current = bgColor; }, [bgColor]);
+  useEffect(() => { brushSizeRef.current = brushSize; }, [brushSize]);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  useEffect(() => { playingRef.current = playing; }, [playing]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    function getTouchPos(touch: Touch) {
+      const rect = canvas!.getBoundingClientRect();
+      return {
+        x: Math.floor((touch.clientX - rect.left) / zoomRef.current),
+        y: Math.floor((touch.clientY - rect.top) / zoomRef.current),
+      };
+    }
+
+    function handleTouchStart(e: TouchEvent) {
+      if (playingRef.current) return;
+      e.preventDefault();
+      const touch = e.touches[0];
+      if (!touch) return;
+      const pos = getTouchPos(touch);
+      drawingRef.current = true;
+      startPosRef.current = pos;
+      lastPosRef.current = pos;
+      setMousePos(pos);
+      const ctx = getCtx();
+      if (!ctx) return;
+      const color = fgColorRef.current;
+      const t = toolRef.current;
+      if (t === "pencil" || t === "eraser") {
+        drawPixelRect(ctx, pos.x, pos.y, brushSizeRef.current, t === "eraser" ? bgColorRef.current : color);
+      } else if (t === "fill") {
+        floodFill(ctx, pos.x, pos.y, color);
+        drawingRef.current = false;
+      } else if (t === "eyedropper") {
+        const pixel = ctx.getImageData(pos.x, pos.y, 1, 1).data;
+        setFgColor(rgbToHex(pixel[0], pixel[1], pixel[2]));
+        drawingRef.current = false;
+      }
+    }
+
+    function handleTouchMove(e: TouchEvent) {
+      if (!drawingRef.current || playingRef.current) return;
+      e.preventDefault();
+      const touch = e.touches[0];
+      if (!touch) return;
+      const pos = getTouchPos(touch);
+      setMousePos(pos);
+      const ctx = getCtx();
+      const overlay = getOverlayCtx();
+      if (!ctx) return;
+      const color = fgColorRef.current;
+      const t = toolRef.current;
+      const sz = brushSizeRef.current;
+      if (t === "pencil" || t === "eraser") {
+        const last = lastPosRef.current ?? pos;
+        drawLine(ctx, last.x, last.y, pos.x, pos.y, t === "eraser" ? bgColorRef.current : color, sz);
+        lastPosRef.current = pos;
+      } else if (t === "line" && overlay && startPosRef.current) {
+        overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz);
+      } else if ((t === "rect" || t === "rect-fill") && overlay && startPosRef.current) {
+        overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        drawRect(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill");
+      } else if ((t === "ellipse" || t === "ellipse-fill") && overlay && startPosRef.current) {
+        overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill");
+      }
+    }
+
+    function handleTouchEnd(e: TouchEvent) {
+      if (!drawingRef.current) return;
+      e.preventDefault();
+      drawingRef.current = false;
+      const ctx = getCtx();
+      const overlay = getOverlayCtx();
+      if (!ctx || !startPosRef.current) return;
+      const color = fgColorRef.current;
+      const t = toolRef.current;
+      const sz = brushSizeRef.current;
+      // Use last known position for end point
+      const pos = lastPosRef.current ?? startPosRef.current;
+      if (t === "line") {
+        drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz);
+      } else if (t === "rect" || t === "rect-fill") {
+        drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill");
+      } else if (t === "ellipse" || t === "ellipse-fill") {
+        drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill");
+      }
+      if (overlay) overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      startPosRef.current = null;
+      lastPosRef.current = null;
+      setMousePos(null);
+    }
+
+    canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
+    canvas.addEventListener("touchmove", handleTouchMove, { passive: false });
+    canvas.addEventListener("touchend", handleTouchEnd, { passive: false });
+    return () => {
+      canvas.removeEventListener("touchstart", handleTouchStart);
+      canvas.removeEventListener("touchmove", handleTouchMove);
+      canvas.removeEventListener("touchend", handleTouchEnd);
+    };
   }, []);
 
   function handleSave() {
