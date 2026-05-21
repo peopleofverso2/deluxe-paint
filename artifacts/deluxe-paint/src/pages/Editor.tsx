@@ -265,7 +265,9 @@ const TOOLS: { id: Tool; label: string; icon: string }[] = [
   { id: "text",         label: "TEXTE",    icon: "T" },
 ];
 
-const BRUSH_SIZES = [1, 2, 4, 8];
+const BRUSH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128];
+const BRUSH_SIZE_MIN = 1;
+const BRUSH_SIZE_MAX = 512;
 // 320 × 12 = 3840 (4K width). Last level fills a 4K display horizontally.
 const ZOOM_LEVELS = [1, 2, 4, 8, 12];
 
@@ -1234,15 +1236,42 @@ export default function Editor() {
           ))}
           <div style={{ marginTop: 8, borderTop: "1px solid #000", paddingTop: 4 }}>
             <div style={{ color: "#000", fontSize: 10, textAlign: "center", marginBottom: 2 }}>TAILLE</div>
+            <input
+              type="number"
+              min={BRUSH_SIZE_MIN}
+              max={BRUSH_SIZE_MAX}
+              step={1}
+              value={brushSize}
+              onChange={e => {
+                const v = Number(e.target.value);
+                if (!Number.isFinite(v)) return;
+                setBrushSize(Math.max(BRUSH_SIZE_MIN, Math.min(BRUSH_SIZE_MAX, Math.round(v))));
+              }}
+              title={`Taille libre (${BRUSH_SIZE_MIN}–${BRUSH_SIZE_MAX} px)`}
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                background: "#FFF",
+                color: "#000",
+                border: "2px solid #000",
+                padding: "2px 2px",
+                fontFamily: "'VT323', monospace",
+                fontSize: 14,
+                textAlign: "center",
+                marginBottom: 4,
+              }}
+            />
             {BRUSH_SIZES.map(s => (
               <button
                 key={s}
                 className="amiga-button"
                 data-active={brushSize === s}
                 onClick={() => setBrushSize(s)}
-                style={{ width: "100%", height: 24, marginBottom: 2, display: "flex", alignItems: "center", justifyContent: "center" }}
+                title={`${s} px`}
+                style={{ width: "100%", height: 22, marginBottom: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: 0 }}
               >
-                <div style={{ width: s * 2 + 4, height: s * 2 + 4, background: "#000", maxWidth: 20, maxHeight: 20 }} />
+                <div style={{ width: Math.min(s, 12) + 2, height: Math.min(s, 12) + 2, background: "#000", flexShrink: 0 }} />
+                <span style={{ fontSize: 11, color: "#000", lineHeight: 1, fontFamily: "'VT323', monospace" }}>{s}</span>
               </button>
             ))}
           </div>
