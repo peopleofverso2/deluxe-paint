@@ -164,6 +164,51 @@ function clearCanvas(ctx: CanvasRenderingContext2D, color = "#FFFFFF") {
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 }
 
+// Convert ImageData to a compact SVG. Each row is scanned left-to-right and
+// runs of identical pixels are emitted as a single <rect> — much smaller
+// than one rect per pixel, still pixel-perfect.
+function imageDataToSvg(img: ImageData): string {
+  const w = img.width;
+  const h = img.height;
+  const data = img.data;
+  const parts: string[] = [];
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges">`);
+  for (let y = 0; y < h; y++) {
+    let x = 0;
+    while (x < w) {
+      const i = (y * w + x) * 4;
+      const a = data[i + 3];
+      if (a === 0) { x++; continue; }
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      // Extend run as long as next pixel matches RGBA exactly
+      let runEnd = x + 1;
+      while (runEnd < w) {
+        const j = (y * w + runEnd) * 4;
+        if (data[j] !== r || data[j + 1] !== g || data[j + 2] !== b || data[j + 3] !== a) break;
+        runEnd++;
+      }
+      const fill = "#" + [r, g, b].map(v => v.toString(16).padStart(2, "0")).join("");
+      const len = runEnd - x;
+      const opacity = a < 255 ? ` fill-opacity="${(a / 255).toFixed(3)}"` : "";
+      parts.push(`<rect x="${x}" y="${y}" width="${len}" height="1" fill="${fill}"${opacity}/>`);
+      x = runEnd;
+    }
+  }
+  parts.push("</svg>");
+  return parts.join("");
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 const TOOLS: { id: Tool; label: string; icon: string }[] = [
   { id: "pencil",       label: "CRAYON",   icon: "✏" },
   { id: "line",         label: "LIGNE",    icon: "╱" },
@@ -812,6 +857,30 @@ export default function Editor() {
     });
   }
 
+  function handleSaveSvg() {
+    saveCurrentFrame();
+    const ctx = getCtx();
+    if (!ctx) return;
+    const img = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+    const svg = imageDataToSvg(img);
+    downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `frame-${currentFrame + 1}.svg`);
+  }
+
+  function handleSaveAllSvg() {
+    saveCurrentFrame();
+    const offscreen = document.createElement("canvas");
+    offscreen.width = CANVAS_W;
+    offscreen.height = CANVAS_H;
+    const ctx2 = offscreen.getContext("2d")!;
+    framesDataRef.current.forEach((imgData, i) => {
+      if (imgData) ctx2.putImageData(imgData, 0, 0);
+      else clearCanvas(ctx2);
+      const frameImg = ctx2.getImageData(0, 0, CANVAS_W, CANVAS_H);
+      const svg = imageDataToSvg(frameImg);
+      downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `animation-frame-${String(i + 1).padStart(3, "0")}.svg`);
+    });
+  }
+
   const canvasStyle: React.CSSProperties = {
     width: CANVAS_W * zoom,
     height: CANVAS_H * zoom,
@@ -827,8 +896,10 @@ export default function Editor() {
       <div style={{ display: "flex", alignItems: "center", background: "#0055AA", borderBottom: "2px solid #000", padding: "0 4px", flexShrink: 0, height: 28 }}>
         <MenuDropdown label="IMAGE" items={[
           { label: "NOUVEAU", action: handleNew },
-          { label: "SAUVER FRAME", action: handleSave },
+          { label: "SAUVER FRAME (PNG)", action: handleSave },
+          { label: "SAUVER FRAME (SVG)", action: handleSaveSvg },
           { label: "SAUVER TOUTES LES FRAMES (PNG)", action: handleSaveGif },
+          { label: "SAUVER TOUTES LES FRAMES (SVG)", action: handleSaveAllSvg },
         ]} />
         <MenuDropdown label="ZOOM" items={ZOOM_LEVELS.map(z => ({
           label: `x${z}${z === 12 ? "  (4K)" : ""}${!fit && z === zoom ? " ✓" : ""}`,
