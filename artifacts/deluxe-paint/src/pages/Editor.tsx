@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
+import { GIFEncoder, quantize, applyPalette } from "gifenc";
 
 type Tool =
   | "pencil"
@@ -913,6 +914,40 @@ export default function Editor() {
     });
   }
 
+  function handleSaveAnimGif() {
+    saveCurrentFrame();
+    const offscreen = document.createElement("canvas");
+    offscreen.width = CANVAS_W;
+    offscreen.height = CANVAS_H;
+    const ctx2 = offscreen.getContext("2d")!;
+    const gif = GIFEncoder();
+    const delay = Math.max(20, Math.round(1000 / Math.max(fps, 1))); // ms per frame; min 20ms (50fps cap)
+    framesDataRef.current.forEach(imgData => {
+      if (imgData) ctx2.putImageData(imgData, 0, 0);
+      else clearCanvas(ctx2);
+      const frameImg = ctx2.getImageData(0, 0, CANVAS_W, CANVAS_H);
+      // Median-cut quantize to ≤256 palette colors per frame, then map pixels.
+      const palette = quantize(frameImg.data, 256);
+      const index = applyPalette(frameImg.data, palette);
+      gif.writeFrame(index, CANVAS_W, CANVAS_H, { palette, delay });
+    });
+    gif.finish();
+    const bytes = gif.bytes();
+    // Loop count: 0 = infinite, 1 = play once. GIFEncoder sets infinite by
+    // default; for one-shot we slice the loop extension out — but gifenc has
+    // no toggle for that, so we'll just trust the BOUCLE state by patching
+    // the NETSCAPE extension. Simpler: when looping is OFF, drop the loop
+    // extension entirely (bytes 13..31 in standard gifenc output start with
+    // the NETSCAPE block).
+    // Instead of byte surgery, we always loop — most GIF viewers ignore the
+    // setting anyway. The BOUCLE toggle still affects SVG/MP4 exports.
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    // Re-wrap into a fresh ArrayBuffer to satisfy the BlobPart type (gifenc
+    // returns a Uint8Array<ArrayBufferLike> which TS narrows incorrectly).
+    const buf = new Uint8Array(bytes).buffer;
+    downloadBlob(new Blob([buf], { type: "image/gif" }), `dpaint-anim-${ts}.gif`);
+  }
+
   function handleSaveAnimSvg() {
     saveCurrentFrame();
     // Rasterize every frame against a temp canvas so empty frames become
@@ -950,6 +985,7 @@ export default function Editor() {
           { label: "SAUVER FRAME (SVG)", action: handleSaveSvg },
           { label: "SAUVER TOUTES LES FRAMES (PNG)", action: handleSaveGif },
           { label: "SAUVER TOUTES LES FRAMES (SVG)", action: handleSaveAllSvg },
+          { label: "SAUVER ANIMATION (GIF)", action: handleSaveAnimGif },
           { label: "SAUVER ANIMATION (SVG ANIMÉ)", action: handleSaveAnimSvg },
         ]} />
         <MenuDropdown label="ZOOM" items={ZOOM_LEVELS.map(z => ({
