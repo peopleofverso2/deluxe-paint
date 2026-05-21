@@ -186,6 +186,7 @@ export default function Editor() {
   const [bgColor, setBgColor] = useState("#000000");
   const [brushSize, setBrushSize] = useState(1);
   const [zoom, setZoom] = useState(() => window.innerWidth <= 640 ? 1 : 2);
+  const [fit, setFit] = useState(true);
   const [aliased, setAliased] = useState(true);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
 
@@ -198,6 +199,7 @@ export default function Editor() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  const canvasAreaRef = useRef<HTMLDivElement>(null);
   const framesDataRef = useRef<(ImageData | null)[]>([null]);
   const liveDataRef = useRef<ImageData | null>(null);
   const drawingRef = useRef(false);
@@ -240,6 +242,30 @@ export default function Editor() {
     if (ctx) ctx.imageSmoothingEnabled = !aliased;
     if (overlay) overlay.imageSmoothingEnabled = !aliased;
   }, [aliased]);
+
+  // FIT mode: auto-scale zoom so the canvas fills the available area on
+  // every container resize. Integer zoom keeps pixels crisp; fall back to
+  // fractional only when the area is smaller than one logical canvas (mobile).
+  useEffect(() => {
+    if (!fit) return;
+    const area = canvasAreaRef.current;
+    if (!area) return;
+    const MARGIN = 32; // matches the 16px margin on the inner wrapper, both sides
+    const compute = () => {
+      const w = area.clientWidth - MARGIN;
+      const h = area.clientHeight - MARGIN;
+      if (w <= 0 || h <= 0) return;
+      const fitW = w / CANVAS_W;
+      const fitH = h / CANVAS_H;
+      const raw = Math.min(fitW, fitH);
+      const next = raw >= 1 ? Math.floor(raw) : raw;
+      setZoom(prev => Math.abs(prev - next) < 0.001 ? prev : next);
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(area);
+    return () => ro.disconnect();
+  }, [fit]);
 
   // After every React render, restore canvas content from liveDataRef.
   // This prevents mobile browsers from silently wiping the canvas on re-render.
@@ -751,13 +777,22 @@ export default function Editor() {
           { label: "SAUVER TOUTES LES FRAMES (PNG)", action: handleSaveGif },
         ]} />
         <MenuDropdown label="ZOOM" items={ZOOM_LEVELS.map(z => ({
-          label: `x${z}${z === 12 ? "  (4K)" : ""}${z === zoom ? " ✓" : ""}`,
-          action: () => setZoom(z),
+          label: `x${z}${z === 12 ? "  (4K)" : ""}${!fit && z === zoom ? " ✓" : ""}`,
+          action: () => { setFit(false); setZoom(z); },
         }))} />
         <button
           className="amiga-button"
-          onClick={() => setZoom(12)}
-          data-active={zoom === 12}
+          onClick={() => setFit(v => !v)}
+          data-active={fit}
+          title="REMPLIR LA FENÊTRE (AUTO-ZOOM)"
+          style={{ padding: "2px 10px", height: 24, color: "#000", marginLeft: 4 }}
+        >
+          {fit ? "FIT ON" : "FIT"}
+        </button>
+        <button
+          className="amiga-button"
+          onClick={() => { setFit(false); setZoom(12); }}
+          data-active={!fit && zoom === 12}
           title="ZOOM x12 — REMPLIT UN ÉCRAN 4K"
           style={{ padding: "2px 10px", height: 24, color: "#000", marginLeft: 4 }}
         >
@@ -820,7 +855,7 @@ export default function Editor() {
         </div>
 
         {/* CANVAS AREA */}
-        <div style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "flex-start", justifyContent: "flex-start", background: "#222", position: "relative" }}>
+        <div ref={canvasAreaRef} style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", background: "#222", position: "relative" }}>
           <div style={{ position: "relative", margin: 16, display: "inline-block" }}>
             <canvas
               ref={canvasRef}
@@ -952,7 +987,7 @@ export default function Editor() {
           <div style={{ flex: 1, color: "#000", fontSize: 14, paddingLeft: 8 }}>
             <div>OUTIL: {TOOLS.find(t => t.id === tool)?.label ?? tool.toUpperCase()}</div>
             <div>POS: {mousePos ? `${mousePos.x},${mousePos.y}` : "--,--"}</div>
-            <div>ZOOM: x{zoom}</div>
+            <div>ZOOM: x{zoom < 1 ? zoom.toFixed(2) : zoom}{fit ? " (FIT)" : ""}</div>
           </div>
 
           {/* FG/BG color display */}
