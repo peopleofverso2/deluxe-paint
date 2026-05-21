@@ -290,6 +290,8 @@ export default function Editor() {
     setPlaying(true);
     let f = currentFrameRef.current;
     playIntervalRef.current = setInterval(() => {
+      // Persist any live edits made on the current frame before advancing
+      saveCurrentFrame();
       f = (f + 1) % frameCountRef.current;
       if (!loopingRef.current && f === 0) {
         stopPlayback();
@@ -306,6 +308,7 @@ export default function Editor() {
       clearInterval(playIntervalRef.current);
       playIntervalRef.current = null;
     }
+    saveCurrentFrame();
     setPlaying(false);
   }
 
@@ -366,7 +369,6 @@ export default function Editor() {
 
   // Drawing handlers
   const onMouseDown = useCallback((e: React.MouseEvent) => {
-    if (playing) return;
     e.preventDefault();
     const isRight = e.button === 2;
     const color = isRight ? bgColor : fgColor;
@@ -397,7 +399,6 @@ export default function Editor() {
     const pos = getCanvasCoords(e);
     setMousePos(pos);
     if (!drawingRef.current) return;
-    if (playing) return;
     const isRight = e.buttons === 2;
     const color = isRight ? bgColor : fgColor;
     const ctx = getCtx();
@@ -480,7 +481,6 @@ export default function Editor() {
     }
 
     function handleTouchStart(e: TouchEvent) {
-      if (playingRef.current) return;
       e.preventDefault();
       const touch = e.touches[0];
       if (!touch) return;
@@ -508,7 +508,7 @@ export default function Editor() {
     }
 
     function handleTouchMove(e: TouchEvent) {
-      if (!drawingRef.current || playingRef.current) return;
+      if (!drawingRef.current) return;
       e.preventDefault();
       const touch = e.touches[0];
       if (!touch) return;
