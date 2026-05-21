@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 
 type Tool =
   | "pencil"
@@ -176,7 +176,7 @@ export default function Editor() {
   const [fgColor, setFgColor] = useState("#FF0000");
   const [bgColor, setBgColor] = useState("#000000");
   const [brushSize, setBrushSize] = useState(1);
-  const [zoom, setZoom] = useState(2);
+  const [zoom, setZoom] = useState(() => window.innerWidth <= 640 ? 1 : 2);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
 
   // Animation state
@@ -189,6 +189,7 @@ export default function Editor() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const framesDataRef = useRef<(ImageData | null)[]>([null]);
+  const liveDataRef = useRef<ImageData | null>(null);
   const drawingRef = useRef(false);
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
@@ -211,7 +212,17 @@ export default function Editor() {
     const ctx = canvas.getContext("2d")!;
     clearCanvas(ctx);
     framesDataRef.current = [null];
+    saveLiveCanvas();
   }, []);
+
+  // After every React render, restore canvas content from liveDataRef.
+  // This prevents mobile browsers from silently wiping the canvas on re-render.
+  useLayoutEffect(() => {
+    if (liveDataRef.current) {
+      const ctx = getCtx();
+      if (ctx) ctx.putImageData(liveDataRef.current, 0, 0);
+    }
+  });
 
   function getCtx() {
     return canvasRef.current?.getContext("2d") ?? null;
@@ -245,6 +256,13 @@ export default function Editor() {
     framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
   }
 
+  // Snapshot canvas → liveDataRef (protects against mobile re-render wipes)
+  function saveLiveCanvas() {
+    const ctx = getCtx();
+    if (!ctx) return;
+    liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+  }
+
   // Load a frame onto canvas
   function loadFrame(idx: number) {
     const ctx = getCtx();
@@ -255,6 +273,7 @@ export default function Editor() {
     } else {
       clearCanvas(ctx);
     }
+    saveLiveCanvas();
   }
 
   function switchToFrame(idx: number) {
@@ -361,8 +380,10 @@ export default function Editor() {
 
     if (tool === "pencil" || tool === "eraser") {
       drawPixelRect(ctx, pos.x, pos.y, brushSize, tool === "eraser" ? bgColor : color);
+      saveLiveCanvas();
     } else if (tool === "fill") {
       floodFill(ctx, pos.x, pos.y, color);
+      saveLiveCanvas();
       drawingRef.current = false;
     } else if (tool === "eyedropper") {
       const pixel = ctx.getImageData(pos.x, pos.y, 1, 1).data;
@@ -387,6 +408,7 @@ export default function Editor() {
       const last = lastPosRef.current ?? pos;
       drawLine(ctx, last.x, last.y, pos.x, pos.y, tool === "eraser" ? bgColor : color, brushSize);
       lastPosRef.current = pos;
+      saveLiveCanvas();
     } else if (tool === "line" && overlay && startPosRef.current) {
       overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
       drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize);
@@ -412,10 +434,13 @@ export default function Editor() {
 
     if (tool === "line") {
       drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize);
+      saveLiveCanvas();
     } else if (tool === "rect" || tool === "rect-fill") {
       drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "rect-fill");
+      saveLiveCanvas();
     } else if (tool === "ellipse" || tool === "ellipse-fill") {
       drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill");
+      saveLiveCanvas();
     }
 
     if (overlay) overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
@@ -470,8 +495,10 @@ export default function Editor() {
       const t = toolRef.current;
       if (t === "pencil" || t === "eraser") {
         drawPixelRect(ctx, pos.x, pos.y, brushSizeRef.current, t === "eraser" ? bgColorRef.current : color);
+        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       } else if (t === "fill") {
         floodFill(ctx, pos.x, pos.y, color);
+        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
         drawingRef.current = false;
       } else if (t === "eyedropper") {
         const pixel = ctx.getImageData(pos.x, pos.y, 1, 1).data;
@@ -497,6 +524,7 @@ export default function Editor() {
         const last = lastPosRef.current ?? pos;
         drawLine(ctx, last.x, last.y, pos.x, pos.y, t === "eraser" ? bgColorRef.current : color, sz);
         lastPosRef.current = pos;
+        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       } else if (t === "line" && overlay && startPosRef.current) {
         overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
         drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz);
@@ -519,14 +547,16 @@ export default function Editor() {
       const color = fgColorRef.current;
       const t = toolRef.current;
       const sz = brushSizeRef.current;
-      // Use last known position for end point
       const pos = lastPosRef.current ?? startPosRef.current;
       if (t === "line") {
         drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz);
+        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       } else if (t === "rect" || t === "rect-fill") {
         drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill");
+        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       } else if (t === "ellipse" || t === "ellipse-fill") {
         drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill");
+        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       }
       if (overlay) overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
       startPosRef.current = null;
@@ -563,7 +593,7 @@ export default function Editor() {
     currentFrameRef.current = 0;
     setCurrentFrame(0);
     const ctx = getCtx();
-    if (ctx) clearCanvas(ctx);
+    if (ctx) { clearCanvas(ctx); saveLiveCanvas(); }
   }
 
   function handleSaveGif() {
