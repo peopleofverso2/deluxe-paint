@@ -164,15 +164,13 @@ function clearCanvas(ctx: CanvasRenderingContext2D, color = "#FFFFFF") {
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 }
 
-// Convert ImageData to a compact SVG. Each row is scanned left-to-right and
-// runs of identical pixels are emitted as a single <rect> — much smaller
-// than one rect per pixel, still pixel-perfect.
-function imageDataToSvg(img: ImageData): string {
+// Scan ImageData row by row and emit one <rect> per run of identical pixels.
+// Returns just the rects — wrap in <svg> or <g> at the call site.
+function imageDataToRects(img: ImageData): string {
   const w = img.width;
   const h = img.height;
   const data = img.data;
   const parts: string[] = [];
-  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges">`);
   for (let y = 0; y < h; y++) {
     let x = 0;
     while (x < w) {
@@ -180,7 +178,6 @@ function imageDataToSvg(img: ImageData): string {
       const a = data[i + 3];
       if (a === 0) { x++; continue; }
       const r = data[i], g = data[i + 1], b = data[i + 2];
-      // Extend run as long as next pixel matches RGBA exactly
       let runEnd = x + 1;
       while (runEnd < w) {
         const j = (y * w + runEnd) * 4;
@@ -193,6 +190,41 @@ function imageDataToSvg(img: ImageData): string {
       parts.push(`<rect x="${x}" y="${y}" width="${len}" height="1" fill="${fill}"${opacity}/>`);
       x = runEnd;
     }
+  }
+  return parts.join("");
+}
+
+function imageDataToSvg(img: ImageData): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${img.width} ${img.height}" shape-rendering="crispEdges">${imageDataToRects(img)}</svg>`;
+}
+
+// Build an animated SVG from a list of frames using SMIL.
+// One <g> per frame, an <animate calcMode="discrete"> toggles its `display`
+// attribute so only the active frame is rendered at any given time.
+// Empty (null) frames render as blank.
+function framesToAnimatedSvg(
+  frames: (ImageData | null)[],
+  w: number,
+  h: number,
+  fps: number,
+  loop: boolean,
+): string {
+  const n = frames.length;
+  if (n === 0) return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}"/>`;
+  const dur = (n / Math.max(fps, 1)).toFixed(4);
+  const repeat = loop ? "indefinite" : "1";
+  const keyTimes = Array.from({ length: n }, (_, i) => (i / n).toFixed(4)).join(";");
+  const parts: string[] = [];
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges">`);
+  parts.push(`<rect width="${w}" height="${h}" fill="#FFFFFF"/>`); // opaque background so frames overlay cleanly
+  for (let i = 0; i < n; i++) {
+    const values = Array.from({ length: n }, (_, k) => k === i ? "inline" : "none").join(";");
+    const initial = i === 0 ? "inline" : "none";
+    const rects = frames[i] ? imageDataToRects(frames[i]!) : "";
+    parts.push(`<g display="${initial}">`);
+    parts.push(`<animate attributeName="display" values="${values}" keyTimes="${keyTimes}" calcMode="discrete" dur="${dur}s" repeatCount="${repeat}" fill="freeze"/>`);
+    parts.push(rects);
+    parts.push(`</g>`);
   }
   parts.push("</svg>");
   return parts.join("");
@@ -881,6 +913,24 @@ export default function Editor() {
     });
   }
 
+  function handleSaveAnimSvg() {
+    saveCurrentFrame();
+    // Rasterize every frame against a temp canvas so empty frames become
+    // a real blank ImageData and the SVG output is consistent.
+    const offscreen = document.createElement("canvas");
+    offscreen.width = CANVAS_W;
+    offscreen.height = CANVAS_H;
+    const ctx2 = offscreen.getContext("2d")!;
+    const baked: ImageData[] = framesDataRef.current.map(imgData => {
+      if (imgData) ctx2.putImageData(imgData, 0, 0);
+      else clearCanvas(ctx2);
+      return ctx2.getImageData(0, 0, CANVAS_W, CANVAS_H);
+    });
+    const svg = framesToAnimatedSvg(baked, CANVAS_W, CANVAS_H, fps, looping);
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `dpaint-anim-${ts}.svg`);
+  }
+
   const canvasStyle: React.CSSProperties = {
     width: CANVAS_W * zoom,
     height: CANVAS_H * zoom,
@@ -900,6 +950,7 @@ export default function Editor() {
           { label: "SAUVER FRAME (SVG)", action: handleSaveSvg },
           { label: "SAUVER TOUTES LES FRAMES (PNG)", action: handleSaveGif },
           { label: "SAUVER TOUTES LES FRAMES (SVG)", action: handleSaveAllSvg },
+          { label: "SAUVER ANIMATION (SVG ANIMÉ)", action: handleSaveAnimSvg },
         ]} />
         <MenuDropdown label="ZOOM" items={ZOOM_LEVELS.map(z => ({
           label: `x${z}${z === 12 ? "  (4K)" : ""}${!fit && z === zoom ? " ✓" : ""}`,
