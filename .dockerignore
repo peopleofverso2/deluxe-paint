@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+**/.cache
+**/.local
+**/.git
+**/.replit-artifact
+**/.agents
+.git
+.gitignore
+.replit
+.replitignore
+*.md
+attached_assets
+.DS_Store

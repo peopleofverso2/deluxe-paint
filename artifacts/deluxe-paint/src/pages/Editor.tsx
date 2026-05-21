@@ -9,7 +9,8 @@ type Tool =
   | "ellipse-fill"
   | "fill"
   | "eyedropper"
-  | "eraser";
+  | "eraser"
+  | "text";
 
 const CANVAS_W = 320;
 const CANVAS_H = 200;
@@ -53,14 +54,16 @@ function drawLine(
   x1: number,
   y1: number,
   color: string,
-  size: number
+  size: number,
+  aliased: boolean = true
 ) {
   ctx.strokeStyle = color;
   ctx.lineWidth = size;
-  ctx.lineCap = "square";
+  ctx.lineCap = aliased ? "square" : "round";
   ctx.beginPath();
-  ctx.moveTo(x0 + 0.5, y0 + 0.5);
-  ctx.lineTo(x1 + 0.5, y1 + 0.5);
+  const off = aliased ? 0.5 : 0;
+  ctx.moveTo(x0 + off, y0 + off);
+  ctx.lineTo(x1 + off, y1 + off);
   ctx.stroke();
 }
 
@@ -72,7 +75,8 @@ function drawRect(
   y1: number,
   color: string,
   size: number,
-  filled: boolean
+  filled: boolean,
+  aliased: boolean = true
 ) {
   const rx = Math.min(x0, x1);
   const ry = Math.min(y0, y1);
@@ -84,7 +88,9 @@ function drawRect(
   } else {
     ctx.strokeStyle = color;
     ctx.lineWidth = size;
-    ctx.strokeRect(rx + 0.5, ry + 0.5, rw, rh);
+    ctx.lineCap = aliased ? "square" : "round";
+    const off = aliased ? 0.5 : 0;
+    ctx.strokeRect(rx + off, ry + off, rw, rh);
   }
 }
 
@@ -96,7 +102,8 @@ function drawEllipse(
   y1: number,
   color: string,
   size: number,
-  filled: boolean
+  filled: boolean,
+  aliased: boolean = true
 ) {
   const cx = (x0 + x1) / 2;
   const cy = (y0 + y1) / 2;
@@ -110,6 +117,7 @@ function drawEllipse(
   } else {
     ctx.strokeStyle = color;
     ctx.lineWidth = size;
+    ctx.lineCap = aliased ? "square" : "round";
     ctx.stroke();
   }
 }
@@ -169,7 +177,8 @@ const TOOLS: { id: Tool; label: string; icon: string }[] = [
 ];
 
 const BRUSH_SIZES = [1, 2, 4, 8];
-const ZOOM_LEVELS = [1, 2, 4, 8];
+// 320 × 12 = 3840 (4K width). Last level fills a 4K display horizontally.
+const ZOOM_LEVELS = [1, 2, 4, 8, 12];
 
 export default function Editor() {
   const [tool, setTool] = useState<Tool>("pencil");
@@ -177,6 +186,7 @@ export default function Editor() {
   const [bgColor, setBgColor] = useState("#000000");
   const [brushSize, setBrushSize] = useState(1);
   const [zoom, setZoom] = useState(() => window.innerWidth <= 640 ? 1 : 2);
+  const [aliased, setAliased] = useState(true);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
 
   // Animation state
@@ -222,6 +232,14 @@ export default function Editor() {
     framesDataRef.current = [null];
     saveLiveCanvas();
   }, []);
+
+  // Apply imageSmoothingEnabled when aliased toggles (affects scaled draws / putImageData blits)
+  useEffect(() => {
+    const ctx = getCtx();
+    const overlay = getOverlayCtx();
+    if (ctx) ctx.imageSmoothingEnabled = !aliased;
+    if (overlay) overlay.imageSmoothingEnabled = !aliased;
+  }, [aliased]);
 
   // After every React render, restore canvas content from liveDataRef.
   // This prevents mobile browsers from silently wiping the canvas on re-render.
@@ -501,20 +519,20 @@ export default function Editor() {
 
     if (tool === "pencil" || tool === "eraser") {
       const last = lastPosRef.current ?? pos;
-      drawLine(ctx, last.x, last.y, pos.x, pos.y, tool === "eraser" ? bgColor : color, brushSize);
+      drawLine(ctx, last.x, last.y, pos.x, pos.y, tool === "eraser" ? bgColor : color, brushSize, aliased);
       lastPosRef.current = pos;
       saveLiveCanvas();
     } else if (tool === "line" && overlay && startPosRef.current) {
       overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
-      drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize);
+      drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, aliased);
     } else if ((tool === "rect" || tool === "rect-fill") && overlay && startPosRef.current) {
       overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
-      drawRect(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "rect-fill");
+      drawRect(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "rect-fill", aliased);
     } else if ((tool === "ellipse" || tool === "ellipse-fill") && overlay && startPosRef.current) {
       overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
-      drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill");
+      drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
     }
-  }, [tool, fgColor, bgColor, brushSize, zoom, playing]);
+  }, [tool, fgColor, bgColor, brushSize, zoom, playing, aliased]);
 
   const onMouseUp = useCallback((e: React.MouseEvent) => {
     if (!drawingRef.current) return;
@@ -528,20 +546,20 @@ export default function Editor() {
     if (!ctx || !startPosRef.current) return;
 
     if (tool === "line") {
-      drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize);
+      drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, aliased);
       saveLiveCanvas();
     } else if (tool === "rect" || tool === "rect-fill") {
-      drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "rect-fill");
+      drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "rect-fill", aliased);
       saveLiveCanvas();
     } else if (tool === "ellipse" || tool === "ellipse-fill") {
-      drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill");
+      drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
       saveLiveCanvas();
     }
 
     if (overlay) overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
     startPosRef.current = null;
     lastPosRef.current = null;
-  }, [tool, fgColor, bgColor, brushSize, zoom]);
+  }, [tool, fgColor, bgColor, brushSize, zoom, aliased]);
 
   const onMouseLeave = useCallback(() => {
     setMousePos(null);
@@ -554,6 +572,7 @@ export default function Editor() {
   const brushSizeRef = useRef(brushSize);
   const zoomRef = useRef(zoom);
   const playingRef = useRef(playing);
+  const aliasedRef = useRef(aliased);
 
   useEffect(() => { toolRef.current = tool; }, [tool]);
   useEffect(() => { fgColorRef.current = fgColor; }, [fgColor]);
@@ -561,6 +580,7 @@ export default function Editor() {
   useEffect(() => { brushSizeRef.current = brushSize; }, [brushSize]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => { playingRef.current = playing; }, [playing]);
+  useEffect(() => { aliasedRef.current = aliased; }, [aliased]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -614,20 +634,21 @@ export default function Editor() {
       const color = fgColorRef.current;
       const t = toolRef.current;
       const sz = brushSizeRef.current;
+      const al = aliasedRef.current;
       if (t === "pencil" || t === "eraser") {
         const last = lastPosRef.current ?? pos;
-        drawLine(ctx, last.x, last.y, pos.x, pos.y, t === "eraser" ? bgColorRef.current : color, sz);
+        drawLine(ctx, last.x, last.y, pos.x, pos.y, t === "eraser" ? bgColorRef.current : color, sz, al);
         lastPosRef.current = pos;
         liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       } else if (t === "line" && overlay && startPosRef.current) {
         overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
-        drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz);
+        drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, al);
       } else if ((t === "rect" || t === "rect-fill") && overlay && startPosRef.current) {
         overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
-        drawRect(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill");
+        drawRect(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill", al);
       } else if ((t === "ellipse" || t === "ellipse-fill") && overlay && startPosRef.current) {
         overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
-        drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill");
+        drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill", al);
       }
     }
 
@@ -641,15 +662,16 @@ export default function Editor() {
       const color = fgColorRef.current;
       const t = toolRef.current;
       const sz = brushSizeRef.current;
+      const al = aliasedRef.current;
       const pos = lastPosRef.current ?? startPosRef.current;
       if (t === "line") {
-        drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz);
+        drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, al);
         liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       } else if (t === "rect" || t === "rect-fill") {
-        drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill");
+        drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill", al);
         liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       } else if (t === "ellipse" || t === "ellipse-fill") {
-        drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill");
+        drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill", al);
         liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
       }
       if (overlay) overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
@@ -713,7 +735,7 @@ export default function Editor() {
   const canvasStyle: React.CSSProperties = {
     width: CANVAS_W * zoom,
     height: CANVAS_H * zoom,
-    imageRendering: "pixelated",
+    imageRendering: aliased ? "pixelated" : "auto",
     display: "block",
     cursor: tool === "eyedropper" ? "crosshair" : tool === "fill" ? "cell" : "crosshair",
   };
@@ -729,9 +751,27 @@ export default function Editor() {
           { label: "SAUVER TOUTES LES FRAMES (PNG)", action: handleSaveGif },
         ]} />
         <MenuDropdown label="ZOOM" items={ZOOM_LEVELS.map(z => ({
-          label: `x${z}${z === zoom ? " ✓" : ""}`,
+          label: `x${z}${z === 12 ? "  (4K)" : ""}${z === zoom ? " ✓" : ""}`,
           action: () => setZoom(z),
         }))} />
+        <button
+          className="amiga-button"
+          onClick={() => setZoom(12)}
+          data-active={zoom === 12}
+          title="ZOOM x12 — REMPLIT UN ÉCRAN 4K"
+          style={{ padding: "2px 10px", height: 24, color: "#000", marginLeft: 4 }}
+        >
+          4K
+        </button>
+        <button
+          className="amiga-button"
+          onClick={() => setAliased(v => !v)}
+          data-active={aliased}
+          title={aliased ? "RENDU ALIASÉ (PIXEL ART)" : "RENDU LISSÉ (ANTI-ALIASING)"}
+          style={{ padding: "2px 10px", height: 24, color: "#000", marginLeft: 4 }}
+        >
+          {aliased ? "ALIAS ON" : "ALIAS OFF"}
+        </button>
         <div style={{ marginLeft: "auto", color: "#FFF", fontSize: 14, paddingRight: 8 }}>
           DELUXE PAINT — AMIGA
         </div>
