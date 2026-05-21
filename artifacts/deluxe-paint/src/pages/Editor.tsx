@@ -313,6 +313,7 @@ export default function Editor() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
+  const projectInputRef = useRef<HTMLInputElement>(null);
   const framesDataRef = useRef<(ImageData | null)[]>([null]);
   const liveDataRef = useRef<ImageData | null>(null);
   const drawingRef = useRef(false);
@@ -914,6 +915,84 @@ export default function Editor() {
     });
   }
 
+  function handleSaveProject() {
+    saveCurrentFrame();
+    const offscreen = document.createElement("canvas");
+    offscreen.width = CANVAS_W;
+    offscreen.height = CANVAS_H;
+    const ctx2 = offscreen.getContext("2d")!;
+    const frames = framesDataRef.current.map(imgData => {
+      if (!imgData) return null; // empty/blank frame stays null
+      ctx2.putImageData(imgData, 0, 0);
+      return offscreen.toDataURL("image/png");
+    });
+    const data = {
+      format: "dpaint-project",
+      version: 1,
+      width: CANVAS_W,
+      height: CANVAS_H,
+      fps,
+      looping,
+      currentFrame,
+      frames,
+    };
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    downloadBlob(new Blob([JSON.stringify(data)], { type: "application/json" }), `dpaint-project-${ts}.dpaint`);
+  }
+
+  function handleOpenProject() {
+    projectInputRef.current?.click();
+  }
+
+  async function onProjectFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (data?.format !== "dpaint-project") throw new Error("Format inconnu (attendu : dpaint-project)");
+      if (!Array.isArray(data.frames)) throw new Error("Pas de frames dans le projet");
+      if ((data.width && data.width !== CANVAS_W) || (data.height && data.height !== CANVAS_H)) {
+        if (!confirm(`Projet ${data.width}×${data.height} ≠ ${CANVAS_W}×${CANVAS_H}. Le contenu sera tronqué. Continuer ?`)) {
+          e.target.value = "";
+          return;
+        }
+      }
+      stopPlayback();
+      const loaded: (ImageData | null)[] = await Promise.all(
+        (data.frames as (string | null)[]).map(url => {
+          if (!url) return Promise.resolve<ImageData | null>(null);
+          return new Promise<ImageData | null>((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+              const c = document.createElement("canvas");
+              c.width = CANVAS_W;
+              c.height = CANVAS_H;
+              const ctx = c.getContext("2d")!;
+              ctx.drawImage(img, 0, 0);
+              resolve(ctx.getImageData(0, 0, CANVAS_W, CANVAS_H));
+            };
+            img.onerror = () => reject(new Error("Frame illisible"));
+            img.src = url;
+          });
+        })
+      );
+      framesDataRef.current = loaded.length ? loaded : [null];
+      const n = framesDataRef.current.length;
+      frameCountRef.current = n;
+      setFrameCount(n);
+      if (typeof data.fps === "number") setFps(data.fps);
+      if (typeof data.looping === "boolean") { setLooping(data.looping); loopingRef.current = data.looping; }
+      const start = typeof data.currentFrame === "number" ? Math.min(Math.max(0, data.currentFrame), n - 1) : 0;
+      currentFrameRef.current = start;
+      setCurrentFrame(start);
+      loadFrame(start);
+    } catch (err) {
+      alert("Impossible de charger le projet : " + (err instanceof Error ? err.message : String(err)));
+    }
+    e.target.value = ""; // reset so re-selecting the same file re-triggers
+  }
+
   function handleSaveAnimGif() {
     saveCurrentFrame();
     const offscreen = document.createElement("canvas");
@@ -981,6 +1060,8 @@ export default function Editor() {
       <div style={{ display: "flex", alignItems: "center", background: "#191919", borderBottom: "2px solid #000", padding: "0 4px", flexShrink: 0, height: 28 }}>
         <MenuDropdown label="IMAGE" items={[
           { label: "NOUVEAU", action: handleNew },
+          { label: "OUVRIR PROJET (.dpaint)", action: handleOpenProject },
+          { label: "SAUVER PROJET (.dpaint)", action: handleSaveProject },
           { label: "SAUVER FRAME (PNG)", action: handleSave },
           { label: "SAUVER FRAME (SVG)", action: handleSaveSvg },
           { label: "SAUVER TOUTES LES FRAMES (PNG)", action: handleSaveGif },
@@ -988,6 +1069,13 @@ export default function Editor() {
           { label: "SAUVER ANIMATION (GIF)", action: handleSaveAnimGif },
           { label: "SAUVER ANIMATION (SVG ANIMÉ)", action: handleSaveAnimSvg },
         ]} />
+        <input
+          ref={projectInputRef}
+          type="file"
+          accept=".dpaint,application/json"
+          style={{ display: "none" }}
+          onChange={onProjectFileSelected}
+        />
         <MenuDropdown label="ZOOM" items={ZOOM_LEVELS.map(z => ({
           label: `x${z}${z === 12 ? "  (4K)" : ""}${!fit && z === zoom ? " ✓" : ""}`,
           action: () => { setFit(false); setZoom(z); },
