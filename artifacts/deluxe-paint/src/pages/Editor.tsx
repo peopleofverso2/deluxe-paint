@@ -269,12 +269,19 @@ const BRUSH_SIZES = [1, 2, 4, 8];
 // 320 × 12 = 3840 (4K width). Last level fills a 4K display horizontally.
 const ZOOM_LEVELS = [1, 2, 4, 8, 12];
 
-const TEXT_FONTS: { label: string; family: string }[] = [
-  { label: "VT323",  family: "'VT323', monospace" },
-  { label: "8-BIT",  family: "'Press Start 2P', monospace" },
-  { label: "SANS",   family: "'Inter', sans-serif" },
+const TEXT_FONTS: { label: string; family: string; pixel?: boolean }[] = [
+  // Pixel-art webfonts (Amiga vibe)
+  { label: "VT323",   family: "'VT323', monospace", pixel: true },
+  { label: "8-BIT",   family: "'Press Start 2P', monospace", pixel: true },
+  // HD system fonts — vector, rendered by the OS at any size, crisp on 4K
+  { label: "SYSTÈME", family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" },
+  { label: "SERIF",   family: "Georgia, 'Times New Roman', Times, serif" },
+  { label: "MONO",    family: "ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace" },
+  { label: "INTER",   family: "'Inter', sans-serif" },
 ];
-const TEXT_SIZES = [8, 12, 16, 24, 32, 48];
+const TEXT_SIZES = [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256];
+const TEXT_SIZE_MIN = 4;
+const TEXT_SIZE_MAX = 1024;
 
 function stampText(
   ctx: CanvasRenderingContext2D,
@@ -285,15 +292,22 @@ function stampText(
   family: string,
   size: number,
   aliased: boolean,
+  isPixelFont: boolean,
 ) {
   ctx.save();
-  ctx.imageSmoothingEnabled = !aliased;
+  // Pixel-art fonts pair with the aliased toggle (so they stay crisp);
+  // HD fonts always render with smooth anti-aliasing — they're vector and
+  // would look broken if forced into nearest-neighbor mode.
+  const forceAliased = aliased && isPixelFont;
+  ctx.imageSmoothingEnabled = !forceAliased;
   ctx.fillStyle = color;
   ctx.font = `${size}px ${family}`;
   ctx.textBaseline = "top";
-  // Without explicit smoothing control, Canvas anti-aliases text.
-  // In aliased mode we drop the antialiasing hint (where supported).
-  if (aliased) (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = "geometricPrecision";
+  if (forceAliased) {
+    (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = "geometricPrecision";
+  } else {
+    (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = "optimizeLegibility";
+  }
   ctx.fillText(text, x, y);
   ctx.restore();
 }
@@ -680,7 +694,8 @@ export default function Editor() {
       drawingRef.current = false;
     } else if (tool === "text") {
       if (textInput) {
-        stampText(ctx, pos.x, pos.y, color, textInput, TEXT_FONTS[textFontIdx].family, textSize, aliased);
+        const font = TEXT_FONTS[textFontIdx];
+        stampText(ctx, pos.x, pos.y, color, textInput, font.family, textSize, aliased, !!font.pixel);
         saveLiveCanvas();
       }
       drawingRef.current = false;
@@ -807,7 +822,8 @@ export default function Editor() {
       } else if (t === "text") {
         const txt = textInputRef.current;
         if (txt) {
-          stampText(ctx, pos.x, pos.y, color, txt, TEXT_FONTS[textFontIdxRef.current].family, textSizeRef.current, aliasedRef.current);
+          const font = TEXT_FONTS[textFontIdxRef.current];
+          stampText(ctx, pos.x, pos.y, color, txt, font.family, textSizeRef.current, aliasedRef.current, !!font.pixel);
           liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
         }
         drawingRef.current = false;
@@ -1301,21 +1317,45 @@ export default function Editor() {
                 </button>
               ))}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
               <span style={{ color: "#000", fontSize: 14 }}>TAILLE :</span>
+              <input
+                type="number"
+                min={TEXT_SIZE_MIN}
+                max={TEXT_SIZE_MAX}
+                step={1}
+                value={textSize}
+                onChange={e => {
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v)) return;
+                  setTextSize(Math.max(TEXT_SIZE_MIN, Math.min(TEXT_SIZE_MAX, Math.round(v))));
+                }}
+                style={{
+                  background: "#FFF",
+                  color: "#000",
+                  border: "2px solid #000",
+                  padding: "2px 4px",
+                  fontFamily: "'VT323', monospace",
+                  fontSize: 14,
+                  width: 64,
+                }}
+                title={`Taille libre (${TEXT_SIZE_MIN}–${TEXT_SIZE_MAX} px)`}
+              />
+              <span style={{ color: "#000", fontSize: 12 }}>px</span>
               {TEXT_SIZES.map(s => (
                 <button
                   key={s}
                   className="amiga-button"
                   data-active={textSize === s}
                   onClick={() => setTextSize(s)}
-                  style={{ padding: "2px 6px", color: "#000", minWidth: 28 }}
+                  style={{ padding: "2px 6px", color: "#000", minWidth: 32 }}
                 >
                   {s}
                 </button>
               ))}
             </div>
             <div style={{ color: "#555", fontSize: 12, marginLeft: "auto" }}>
+              {TEXT_FONTS[textFontIdx].pixel ? "PIXEL · " : "HD · "}
               CLIC SUR LE CANVAS POUR TAMPONNER
             </div>
           </div>
