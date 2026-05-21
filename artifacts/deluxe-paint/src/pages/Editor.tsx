@@ -13,8 +13,18 @@ type Tool =
   | "eraser"
   | "text";
 
-const CANVAS_W = 320;
-const CANVAS_H = 200;
+// Default canvas dimensions (Amiga preset). The runtime size is held in
+// `canvasW`/`canvasH` state — see RESOLUTIONS below for available presets.
+const DEFAULT_W = 320;
+const DEFAULT_H = 200;
+
+const RESOLUTIONS = [
+  { id: "amiga", label: "AMIGA",  w: 320,  h: 200  },
+  { id: "4k",    label: "4K",     w: 3840, h: 2160 },
+] as const;
+// Above this width, frame-by-frame animated exports become impractical
+// (30 fps × multi-MB-per-frame). UI disables them past this threshold.
+const ANIM_EXPORT_MAX_W = 1920;
 
 const AMIGA_PALETTE = [
   "#000000","#FFFFFF","#AAAAAA","#555555",
@@ -289,6 +299,14 @@ function stampText(
 }
 
 export default function Editor() {
+  // Canvas dimensions are state so we can switch resolution at runtime.
+  const [canvasW, setCanvasW] = useState(DEFAULT_W);
+  const [canvasH, setCanvasH] = useState(DEFAULT_H);
+  const canvasWRef = useRef(canvasW);
+  const canvasHRef = useRef(canvasH);
+  useEffect(() => { canvasWRef.current = canvasW; }, [canvasW]);
+  useEffect(() => { canvasHRef.current = canvasH; }, [canvasH]);
+
   const [tool, setTool] = useState<Tool>("pencil");
   const [fgColor, setFgColor] = useState("#FF0000");
   const [bgColor, setBgColor] = useState("#000000");
@@ -376,8 +394,8 @@ export default function Editor() {
       const w = area.clientWidth - MARGIN;
       const h = area.clientHeight - MARGIN;
       if (w <= 0 || h <= 0) return;
-      const fitW = w / CANVAS_W;
-      const fitH = h / CANVAS_H;
+      const fitW = w / canvasW;
+      const fitH = h / canvasH;
       const raw = Math.min(fitW, fitH);
       const next = raw >= 1 ? Math.floor(raw) : raw;
       setZoom(prev => Math.abs(prev - next) < 0.001 ? prev : next);
@@ -386,7 +404,7 @@ export default function Editor() {
     const ro = new ResizeObserver(compute);
     ro.observe(area);
     return () => ro.disconnect();
-  }, [fit]);
+  }, [fit, canvasW, canvasH]);
 
   // After every React render, restore canvas content from liveDataRef.
   // This prevents mobile browsers from silently wiping the canvas on re-render.
@@ -426,14 +444,14 @@ export default function Editor() {
   function saveCurrentFrame() {
     const ctx = getCtx();
     if (!ctx) return;
-    framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+    framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
   }
 
   // Snapshot canvas → liveDataRef (protects against mobile re-render wipes)
   function saveLiveCanvas() {
     const ctx = getCtx();
     if (!ctx) return;
-    liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+    liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
   }
 
   // Load a frame onto canvas
@@ -685,13 +703,13 @@ export default function Editor() {
       lastPosRef.current = pos;
       saveLiveCanvas();
     } else if (tool === "line" && overlay && startPosRef.current) {
-      overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      overlay.clearRect(0, 0, canvasW, canvasH);
       drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, aliased);
     } else if ((tool === "rect" || tool === "rect-fill") && overlay && startPosRef.current) {
-      overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      overlay.clearRect(0, 0, canvasW, canvasH);
       drawRect(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "rect-fill", aliased);
     } else if ((tool === "ellipse" || tool === "ellipse-fill") && overlay && startPosRef.current) {
-      overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      overlay.clearRect(0, 0, canvasW, canvasH);
       drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
     }
   }, [tool, fgColor, bgColor, brushSize, zoom, playing, aliased]);
@@ -718,7 +736,7 @@ export default function Editor() {
       saveLiveCanvas();
     }
 
-    if (overlay) overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    if (overlay) overlay.clearRect(0, 0, canvasW, canvasH);
     startPosRef.current = null;
     lastPosRef.current = null;
   }, [tool, fgColor, bgColor, brushSize, zoom, aliased]);
@@ -777,10 +795,10 @@ export default function Editor() {
       const t = toolRef.current;
       if (t === "pencil" || t === "eraser") {
         drawPixelRect(ctx, pos.x, pos.y, brushSizeRef.current, t === "eraser" ? bgColorRef.current : color);
-        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "fill") {
         floodFill(ctx, pos.x, pos.y, color);
-        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
         drawingRef.current = false;
       } else if (t === "eyedropper") {
         const pixel = ctx.getImageData(pos.x, pos.y, 1, 1).data;
@@ -790,7 +808,7 @@ export default function Editor() {
         const txt = textInputRef.current;
         if (txt) {
           stampText(ctx, pos.x, pos.y, color, txt, TEXT_FONTS[textFontIdxRef.current].family, textSizeRef.current, aliasedRef.current);
-          liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+          liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
         }
         drawingRef.current = false;
       }
@@ -814,15 +832,15 @@ export default function Editor() {
         const last = lastPosRef.current ?? pos;
         drawLine(ctx, last.x, last.y, pos.x, pos.y, t === "eraser" ? bgColorRef.current : color, sz, al);
         lastPosRef.current = pos;
-        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "line" && overlay && startPosRef.current) {
-        overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        overlay.clearRect(0, 0, canvasW, canvasH);
         drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, al);
       } else if ((t === "rect" || t === "rect-fill") && overlay && startPosRef.current) {
-        overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        overlay.clearRect(0, 0, canvasW, canvasH);
         drawRect(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill", al);
       } else if ((t === "ellipse" || t === "ellipse-fill") && overlay && startPosRef.current) {
-        overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        overlay.clearRect(0, 0, canvasW, canvasH);
         drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill", al);
       }
     }
@@ -841,15 +859,15 @@ export default function Editor() {
       const pos = lastPosRef.current ?? startPosRef.current;
       if (t === "line") {
         drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, al);
-        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "rect" || t === "rect-fill") {
         drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill", al);
-        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "ellipse" || t === "ellipse-fill") {
         drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill", al);
-        liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       }
-      if (overlay) overlay.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      if (overlay) overlay.clearRect(0, 0, canvasW, canvasH);
       startPosRef.current = null;
       lastPosRef.current = null;
       setMousePos(null);
@@ -863,7 +881,8 @@ export default function Editor() {
       canvas.removeEventListener("touchmove", handleTouchMove);
       canvas.removeEventListener("touchend", handleTouchEnd);
     };
-  }, []);
+    // Re-register on resolution change so handlers close over the fresh dims.
+  }, [canvasW, canvasH]);
 
   function handleSave() {
     saveCurrentFrame();
@@ -887,13 +906,42 @@ export default function Editor() {
     if (ctx) { clearCanvas(ctx); saveLiveCanvas(); }
   }
 
+  // Nearest-neighbor rescale via an offscreen canvas (imageSmoothingEnabled off).
+  function rescaleImageData(src: ImageData, dstW: number, dstH: number): ImageData {
+    const srcCanvas = document.createElement("canvas");
+    srcCanvas.width = src.width;
+    srcCanvas.height = src.height;
+    srcCanvas.getContext("2d")!.putImageData(src, 0, 0);
+    const dstCanvas = document.createElement("canvas");
+    dstCanvas.width = dstW;
+    dstCanvas.height = dstH;
+    const dstCtx = dstCanvas.getContext("2d")!;
+    dstCtx.imageSmoothingEnabled = false;
+    dstCtx.drawImage(srcCanvas, 0, 0, dstW, dstH);
+    return dstCtx.getImageData(0, 0, dstW, dstH);
+  }
+
+  function switchResolution(newW: number, newH: number) {
+    if (newW === canvasW && newH === canvasH) return;
+    stopPlayback();
+    // Persist any unsaved live edits before rescaling
+    const ctx = getCtx();
+    if (ctx) framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
+    framesDataRef.current = framesDataRef.current.map(img => img ? rescaleImageData(img, newW, newH) : null);
+    liveDataRef.current = framesDataRef.current[currentFrameRef.current] ?? null;
+    setCanvasW(newW);
+    setCanvasH(newH);
+    canvasWRef.current = newW;
+    canvasHRef.current = newH;
+  }
+
   function handleSaveGif() {
     // Save all frames as individual PNGs in a zip-like sequence
     saveCurrentFrame();
     framesDataRef.current.forEach((imgData, i) => {
       const offscreen = document.createElement("canvas");
-      offscreen.width = CANVAS_W;
-      offscreen.height = CANVAS_H;
+      offscreen.width = canvasW;
+      offscreen.height = canvasH;
       const ctx2 = offscreen.getContext("2d")!;
       if (imgData) {
         ctx2.putImageData(imgData, 0, 0);
@@ -911,7 +959,7 @@ export default function Editor() {
     saveCurrentFrame();
     const ctx = getCtx();
     if (!ctx) return;
-    const img = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+    const img = ctx.getImageData(0, 0, canvasW, canvasH);
     const svg = imageDataToSvg(img);
     downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `frame-${currentFrame + 1}.svg`);
   }
@@ -919,13 +967,13 @@ export default function Editor() {
   function handleSaveAllSvg() {
     saveCurrentFrame();
     const offscreen = document.createElement("canvas");
-    offscreen.width = CANVAS_W;
-    offscreen.height = CANVAS_H;
+    offscreen.width = canvasW;
+    offscreen.height = canvasH;
     const ctx2 = offscreen.getContext("2d")!;
     framesDataRef.current.forEach((imgData, i) => {
       if (imgData) ctx2.putImageData(imgData, 0, 0);
       else clearCanvas(ctx2);
-      const frameImg = ctx2.getImageData(0, 0, CANVAS_W, CANVAS_H);
+      const frameImg = ctx2.getImageData(0, 0, canvasW, canvasH);
       const svg = imageDataToSvg(frameImg);
       downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `animation-frame-${String(i + 1).padStart(3, "0")}.svg`);
     });
@@ -934,8 +982,8 @@ export default function Editor() {
   function handleSaveProject() {
     saveCurrentFrame();
     const offscreen = document.createElement("canvas");
-    offscreen.width = CANVAS_W;
-    offscreen.height = CANVAS_H;
+    offscreen.width = canvasW;
+    offscreen.height = canvasH;
     const ctx2 = offscreen.getContext("2d")!;
     const frames = framesDataRef.current.map(imgData => {
       if (!imgData) return null; // empty/blank frame stays null
@@ -945,8 +993,8 @@ export default function Editor() {
     const data = {
       format: "dpaint-project",
       version: 1,
-      width: CANVAS_W,
-      height: CANVAS_H,
+      width: canvasW,
+      height: canvasH,
       fps,
       looping,
       currentFrame,
@@ -968,12 +1016,9 @@ export default function Editor() {
       const data = JSON.parse(text);
       if (data?.format !== "dpaint-project") throw new Error("Format inconnu (attendu : dpaint-project)");
       if (!Array.isArray(data.frames)) throw new Error("Pas de frames dans le projet");
-      if ((data.width && data.width !== CANVAS_W) || (data.height && data.height !== CANVAS_H)) {
-        if (!confirm(`Projet ${data.width}×${data.height} ≠ ${CANVAS_W}×${CANVAS_H}. Le contenu sera tronqué. Continuer ?`)) {
-          e.target.value = "";
-          return;
-        }
-      }
+      // Adopt the project's resolution if it differs (defaults to current dims).
+      const targetW = typeof data.width === "number" && data.width > 0 ? data.width : canvasW;
+      const targetH = typeof data.height === "number" && data.height > 0 ? data.height : canvasH;
       stopPlayback();
       const loaded: (ImageData | null)[] = await Promise.all(
         (data.frames as (string | null)[]).map(url => {
@@ -982,17 +1027,25 @@ export default function Editor() {
             const img = new Image();
             img.onload = () => {
               const c = document.createElement("canvas");
-              c.width = CANVAS_W;
-              c.height = CANVAS_H;
+              c.width = targetW;
+              c.height = targetH;
               const ctx = c.getContext("2d")!;
               ctx.drawImage(img, 0, 0);
-              resolve(ctx.getImageData(0, 0, CANVAS_W, CANVAS_H));
+              resolve(ctx.getImageData(0, 0, targetW, targetH));
             };
             img.onerror = () => reject(new Error("Frame illisible"));
             img.src = url;
           });
         })
       );
+      // Apply the loaded resolution before assigning frame data so the
+      // canvas element gets the new width/height attrs on the next render.
+      if (targetW !== canvasW || targetH !== canvasH) {
+        setCanvasW(targetW);
+        setCanvasH(targetH);
+        canvasWRef.current = targetW;
+        canvasHRef.current = targetH;
+      }
       framesDataRef.current = loaded.length ? loaded : [null];
       const n = framesDataRef.current.length;
       frameCountRef.current = n;
@@ -1012,19 +1065,19 @@ export default function Editor() {
   function handleSaveAnimGif() {
     saveCurrentFrame();
     const offscreen = document.createElement("canvas");
-    offscreen.width = CANVAS_W;
-    offscreen.height = CANVAS_H;
+    offscreen.width = canvasW;
+    offscreen.height = canvasH;
     const ctx2 = offscreen.getContext("2d")!;
     const gif = GIFEncoder();
     const delay = Math.max(20, Math.round(1000 / Math.max(fps, 1))); // ms per frame; min 20ms (50fps cap)
     framesDataRef.current.forEach(imgData => {
       if (imgData) ctx2.putImageData(imgData, 0, 0);
       else clearCanvas(ctx2);
-      const frameImg = ctx2.getImageData(0, 0, CANVAS_W, CANVAS_H);
+      const frameImg = ctx2.getImageData(0, 0, canvasW, canvasH);
       // Median-cut quantize to ≤256 palette colors per frame, then map pixels.
       const palette = quantize(frameImg.data, 256);
       const index = applyPalette(frameImg.data, palette);
-      gif.writeFrame(index, CANVAS_W, CANVAS_H, { palette, delay });
+      gif.writeFrame(index, canvasW, canvasH, { palette, delay });
     });
     gif.finish();
     const bytes = gif.bytes();
@@ -1048,22 +1101,22 @@ export default function Editor() {
     // Rasterize every frame against a temp canvas so empty frames become
     // a real blank ImageData and the SVG output is consistent.
     const offscreen = document.createElement("canvas");
-    offscreen.width = CANVAS_W;
-    offscreen.height = CANVAS_H;
+    offscreen.width = canvasW;
+    offscreen.height = canvasH;
     const ctx2 = offscreen.getContext("2d")!;
     const baked: ImageData[] = framesDataRef.current.map(imgData => {
       if (imgData) ctx2.putImageData(imgData, 0, 0);
       else clearCanvas(ctx2);
-      return ctx2.getImageData(0, 0, CANVAS_W, CANVAS_H);
+      return ctx2.getImageData(0, 0, canvasW, canvasH);
     });
-    const svg = framesToAnimatedSvg(baked, CANVAS_W, CANVAS_H, fps, looping);
+    const svg = framesToAnimatedSvg(baked, canvasW, canvasH, fps, looping);
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `dpaint-anim-${ts}.svg`);
   }
 
   const canvasStyle: React.CSSProperties = {
-    width: CANVAS_W * zoom,
-    height: CANVAS_H * zoom,
+    width: canvasW * zoom,
+    height: canvasH * zoom,
     imageRendering: aliased ? "pixelated" : "auto",
     display: "block",
     cursor: tool === "text" ? "text" : tool === "fill" ? "cell" : "crosshair",
@@ -1074,17 +1127,27 @@ export default function Editor() {
 
       {/* MENUBAR */}
       <div style={{ display: "flex", alignItems: "center", background: "#191919", borderBottom: "2px solid #000", padding: "0 4px", flexShrink: 0, height: 28 }}>
-        <MenuDropdown label="IMAGE" items={[
-          { label: "NOUVEAU", action: handleNew },
-          { label: "OUVRIR PROJET (.dpaint)", action: handleOpenProject },
-          { label: "SAUVER PROJET (.dpaint)", action: handleSaveProject },
-          { label: "SAUVER FRAME (PNG)", action: handleSave },
-          { label: "SAUVER FRAME (SVG)", action: handleSaveSvg },
-          { label: "SAUVER TOUTES LES FRAMES (PNG)", action: handleSaveGif },
-          { label: "SAUVER TOUTES LES FRAMES (SVG)", action: handleSaveAllSvg },
-          { label: "SAUVER ANIMATION (GIF)", action: handleSaveAnimGif },
-          { label: "SAUVER ANIMATION (SVG ANIMÉ)", action: handleSaveAnimSvg },
-        ]} />
+        <MenuDropdown label="IMAGE" items={(() => {
+          const animOk = canvasW <= ANIM_EXPORT_MAX_W;
+          const animSuffix = animOk ? "" : ` — désactivé en ${canvasW}×${canvasH}`;
+          return [
+            { label: "NOUVEAU", action: handleNew },
+            { label: "OUVRIR PROJET (.dpaint)", action: handleOpenProject },
+            { label: "SAUVER PROJET (.dpaint)", action: handleSaveProject },
+            { label: "SAUVER FRAME (PNG)", action: handleSave },
+            { label: "SAUVER FRAME (SVG)", action: handleSaveSvg },
+            { label: "SAUVER TOUTES LES FRAMES (PNG)", action: handleSaveGif },
+            { label: "SAUVER TOUTES LES FRAMES (SVG)", action: handleSaveAllSvg },
+            {
+              label: `SAUVER ANIMATION (GIF)${animSuffix}`,
+              action: animOk ? handleSaveAnimGif : () => alert(`Export GIF désactivé au-dessus de ${ANIM_EXPORT_MAX_W}px de large (trop lourd). Repasse en AMIGA pour exporter.`),
+            },
+            {
+              label: `SAUVER ANIMATION (SVG ANIMÉ)${animSuffix}`,
+              action: animOk ? handleSaveAnimSvg : () => alert(`Export SVG animé désactivé au-dessus de ${ANIM_EXPORT_MAX_W}px de large (trop lourd). Repasse en AMIGA pour exporter.`),
+            },
+          ];
+        })()} />
         <input
           ref={projectInputRef}
           type="file"
@@ -1092,6 +1155,14 @@ export default function Editor() {
           style={{ display: "none" }}
           onChange={onProjectFileSelected}
         />
+        <MenuDropdown label="RÉSO" items={RESOLUTIONS.map(r => ({
+          label: `${r.label} ${r.w}×${r.h}${r.w === canvasW && r.h === canvasH ? " ✓" : ""}`,
+          action: () => {
+            if (r.w === canvasW && r.h === canvasH) return;
+            if (framesDataRef.current.some(f => f) && !confirm(`Passer en ${r.label} (${r.w}×${r.h}) ? Toutes les frames seront rescalées au plus proche voisin.`)) return;
+            switchResolution(r.w, r.h);
+          },
+        }))} />
         <MenuDropdown label="ZOOM" items={ZOOM_LEVELS.map(z => ({
           label: `x${z}${z === 12 ? "  (4K)" : ""}${!fit && z === zoom ? " ✓" : ""}`,
           action: () => { setFit(false); setZoom(z); },
@@ -1175,8 +1246,8 @@ export default function Editor() {
           <div style={{ position: "relative", margin: 16, display: "inline-block" }}>
             <canvas
               ref={canvasRef}
-              width={CANVAS_W}
-              height={CANVAS_H}
+              width={canvasW}
+              height={canvasH}
               style={{ ...canvasStyle, position: "relative", zIndex: 1, border: "1px solid #000" }}
               onMouseDown={onMouseDown}
               onMouseMove={onMouseMove}
@@ -1186,8 +1257,8 @@ export default function Editor() {
             />
             <canvas
               ref={overlayRef}
-              width={CANVAS_W}
-              height={CANVAS_H}
+              width={canvasW}
+              height={canvasH}
               style={{ ...canvasStyle, position: "absolute", top: 0, left: 0, zIndex: 2, pointerEvents: "none" }}
             />
           </div>
@@ -1434,11 +1505,14 @@ function FrameThumb({ index, current, frameData, onClick }: {
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
     if (frameData) {
-      // Scale down the ImageData
+      // Scale down the ImageData using its own dims (FrameThumb is reused
+      // across resolutions; the parent Editor's canvas size lives in state
+      // that isn't in scope here).
       const offscreen = document.createElement("canvas");
-      offscreen.width = CANVAS_W;
-      offscreen.height = CANVAS_H;
+      offscreen.width = frameData.width;
+      offscreen.height = frameData.height;
       const ctx2 = offscreen.getContext("2d")!;
+      ctx2.imageSmoothingEnabled = false;
       ctx2.putImageData(frameData, 0, 0);
       ctx.drawImage(offscreen, 0, 0, 48, 30);
     } else {
