@@ -199,6 +199,14 @@ export default function Editor() {
   const fpsRef = useRef(fps);
   const loopingRef = useRef(looping);
 
+  // Video recording (magnétoscope)
+  const [recording, setRecording] = useState(false);
+  const [recDuration, setRecDuration] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recChunksRef = useRef<Blob[]>([]);
+  const recStartRef = useRef<number>(0);
+  const recTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Keep refs in sync
   useEffect(() => { currentFrameRef.current = currentFrame; }, [currentFrame]);
   useEffect(() => { frameCountRef.current = frameCount; }, [frameCount]);
@@ -318,6 +326,90 @@ export default function Editor() {
       startPlayback();
     }
   }, [fps]);
+
+  // Video recording (magnétoscope) - records the canvas in real-time
+  function startRecording() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (typeof (canvas as HTMLCanvasElement & { captureStream?: () => MediaStream }).captureStream !== "function") {
+      alert("Votre navigateur ne supporte pas l'enregistrement vidéo du canvas.");
+      return;
+    }
+    const stream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(30);
+    const mimeCandidates = [
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+      "video/mp4;codecs=avc1",
+      "video/mp4",
+    ];
+    const mimeType = typeof MediaRecorder !== "undefined"
+      ? (mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || "")
+      : "";
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 2_500_000 } : undefined);
+    } catch (err) {
+      stream.getTracks().forEach(t => t.stop());
+      alert("Impossible de démarrer l'enregistrement: " + (err instanceof Error ? err.message : String(err)));
+      return;
+    }
+    const actualMime = recorder.mimeType || mimeType || "video/webm";
+    const ext = actualMime.includes("mp4") ? "mp4" : "webm";
+    recChunksRef.current = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) recChunksRef.current.push(e.data);
+    };
+    recorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(recChunksRef.current, { type: actualMime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      a.download = `dpaint-session-${ts}.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      recChunksRef.current = [];
+    };
+    mediaRecorderRef.current = recorder;
+    recorder.start(250);
+    recStartRef.current = Date.now();
+    setRecDuration(0);
+    setRecording(true);
+    if (recTimerRef.current) clearInterval(recTimerRef.current);
+    recTimerRef.current = setInterval(() => {
+      setRecDuration(Math.floor((Date.now() - recStartRef.current) / 1000));
+    }, 250);
+  }
+
+  function stopRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+      recorder.stream.getTracks().forEach(t => t.stop());
+    }
+    mediaRecorderRef.current = null;
+    if (recTimerRef.current) {
+      clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+    setRecording(false);
+  }
+
+  // Stop recording on unmount
+  useEffect(() => {
+    return () => {
+      const rec = mediaRecorderRef.current;
+      if (rec) {
+        try { if (rec.state !== "inactive") rec.stop(); } catch {}
+        try { rec.stream.getTracks().forEach(t => t.stop()); } catch {}
+      }
+      if (recTimerRef.current) clearInterval(recTimerRef.current);
+    };
+  }, []);
 
   // Stop playback on unmount
   useEffect(() => () => { if (playIntervalRef.current) clearInterval(playIntervalRef.current); }, []);
@@ -723,6 +815,25 @@ export default function Editor() {
             )}
             <button className="amiga-button" onClick={() => switchToFrame(Math.min(frameCount - 1, currentFrame + 1))} title="SUIVANT" style={{ padding: "2px 6px" }}>▶</button>
             <button className="amiga-button" onClick={() => switchToFrame(frameCount - 1)} title="FIN" style={{ padding: "2px 6px" }}>▶|</button>
+            {recording ? (
+              <button
+                className="amiga-button"
+                onClick={stopRecording}
+                title="ARRETER L'ENREGISTREMENT"
+                style={{ padding: "2px 8px", background: "#000", color: "#FF3030", fontWeight: "bold", border: "2px solid #FF3030" }}
+              >
+                ■ REC {Math.floor(recDuration / 60).toString().padStart(2, "0")}:{(recDuration % 60).toString().padStart(2, "0")}
+              </button>
+            ) : (
+              <button
+                className="amiga-button"
+                onClick={startRecording}
+                title="ENREGISTRER LA SESSION EN VIDEO"
+                style={{ padding: "2px 8px", background: "#AA0000", color: "#FFF", fontWeight: "bold" }}
+              >
+                ● REC
+              </button>
+            )}
           </div>
 
           {/* Loop toggle */}
