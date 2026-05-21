@@ -58,6 +58,152 @@ function drawPixelRect(
   ctx.fillRect(x - half, y - half, size, size);
 }
 
+// -------------------- Brush shapes --------------------
+
+type BrushShape = "square" | "round" | "diamond" | "cross" | "spray" | "bug";
+
+const BRUSH_SHAPES: { id: BrushShape; label: string; icon: string }[] = [
+  { id: "square",  label: "CARRÉ",   icon: "■" },
+  { id: "round",   label: "ROND",    icon: "●" },
+  { id: "diamond", label: "DIAMANT", icon: "◆" },
+  { id: "cross",   label: "CROIX",   icon: "+" },
+  { id: "spray",   label: "SPRAY",   icon: "✦" },
+  { id: "bug",     label: "BUG",     icon: "⚡" },
+];
+
+// Stamp a single brush at (x, y). `color` is the active foreground; the
+// shape's own random embellishments (spray dots, BUG ghosts) may pick
+// extra colors.
+function stampBrush(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  color: string,
+  shape: BrushShape,
+) {
+  const half = Math.floor(size / 2);
+  ctx.fillStyle = color;
+  switch (shape) {
+    case "square": {
+      ctx.fillRect(x - half, y - half, size, size);
+      return;
+    }
+    case "round": {
+      ctx.beginPath();
+      ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    case "diamond": {
+      const r = size / 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x + r, y);
+      ctx.lineTo(x, y + r);
+      ctx.lineTo(x - r, y);
+      ctx.closePath();
+      ctx.fill();
+      return;
+    }
+    case "cross": {
+      const thick = Math.max(1, Math.round(size / 3));
+      const hh = Math.floor(thick / 2);
+      ctx.fillRect(x - half, y - hh, size, thick);
+      ctx.fillRect(x - hh, y - half, thick, size);
+      return;
+    }
+    case "spray": {
+      const r2 = size / 2;
+      const dots = Math.max(4, Math.round(size * 1.5));
+      for (let i = 0; i < dots; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = Math.random() * r2;
+        const dx = Math.round(Math.cos(angle) * dist);
+        const dy = Math.round(Math.sin(angle) * dist);
+        ctx.fillRect(x + dx, y + dy, 1, 1);
+      }
+      return;
+    }
+    case "bug": {
+      // Glitch: base square + RGB-shifted ghost stamps + scanline displacement
+      // + scattered noise pixels. Each cycle is partially random so a held
+      // line produces varied artifacts.
+      ctx.fillRect(x - half, y - half, size, size);
+      const shift = Math.max(2, Math.round(size / 3));
+      if (Math.random() < 0.65) {
+        ctx.fillStyle = "#FF0040";
+        ctx.fillRect(x - half - shift, y - half - 1, size, size);
+      }
+      if (Math.random() < 0.65) {
+        ctx.fillStyle = "#00E5FF";
+        ctx.fillRect(x - half + shift, y - half + 1, size, size);
+      }
+      if (Math.random() < 0.35) {
+        ctx.fillStyle = Math.random() < 0.5 ? "#FFFFFF" : "#000000";
+        const sx = x - size - Math.floor(Math.random() * size);
+        const syy = y + Math.round((Math.random() - 0.5) * size * 2);
+        ctx.fillRect(sx, syy, size * 3, 1);
+      }
+      const noisePalette = ["#FF00FF", "#00FF00", "#FFFF00", "#000000", "#FFFFFF"];
+      const n = Math.max(2, Math.round(size / 4));
+      for (let i = 0; i < n; i++) {
+        ctx.fillStyle = noisePalette[Math.floor(Math.random() * noisePalette.length)];
+        const px = x + Math.round((Math.random() - 0.5) * size * 2);
+        const py = y + Math.round((Math.random() - 0.5) * size * 2);
+        ctx.fillRect(px, py, 1, 1);
+      }
+      ctx.fillStyle = color;
+      return;
+    }
+  }
+}
+
+// Stamp a brush along a Bresenham line. Samples every step pixels (~size/4)
+// so big brushes don't redundantly stamp 1000s of times along a short move.
+function stampLine(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  size: number,
+  color: string,
+  shape: BrushShape,
+) {
+  // Tiny square brush keeps the old fast path — drawLine with strokes is
+  // crisper than stamping squares pixel-by-pixel and is what the original
+  // pencil expected.
+  if (shape === "square" && size <= 2) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = size;
+    ctx.lineCap = "square";
+    ctx.beginPath();
+    ctx.moveTo(x0 + 0.5, y0 + 0.5);
+    ctx.lineTo(x1 + 0.5, y1 + 0.5);
+    ctx.stroke();
+    return;
+  }
+  const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  let x = x0, y = y0;
+  const step = Math.max(1, Math.floor(size / 4));
+  let i = 0;
+  // safety cap to avoid pathological loops on bogus inputs
+  const limit = (dx + dy) * 2 + 8;
+  while (i <= limit) {
+    if (i === 0 || i % step === 0 || (x === x1 && y === y1)) {
+      stampBrush(ctx, x, y, size, color, shape);
+    }
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x += sx; }
+    if (e2 < dx)  { err += dx; y += sy; }
+    i++;
+  }
+}
+
 function drawLine(
   ctx: CanvasRenderingContext2D,
   x0: number,
@@ -327,6 +473,7 @@ export default function Editor() {
   const [fgColor, setFgColor] = useState("#FF0000");
   const [bgColor, setBgColor] = useState("#000000");
   const [brushSize, setBrushSize] = useState(1);
+  const [brushShape, setBrushShape] = useState<BrushShape>("square");
   const [zoom, setZoom] = useState(() => window.innerWidth <= 640 ? 1 : 2);
   const [fit, setFit] = useState(true);
   const [aliased, setAliased] = useState(true);
@@ -683,7 +830,9 @@ export default function Editor() {
     if (!ctx) return;
 
     if (tool === "pencil" || tool === "eraser") {
-      drawPixelRect(ctx, pos.x, pos.y, brushSize, tool === "eraser" ? bgColor : color);
+      const c = tool === "eraser" ? bgColor : color;
+      // Eraser always uses a plain square; brush shapes are for the pencil.
+      stampBrush(ctx, pos.x, pos.y, brushSize, c, tool === "eraser" ? "square" : brushShape);
       saveLiveCanvas();
     } else if (tool === "fill") {
       floodFill(ctx, pos.x, pos.y, color);
@@ -702,7 +851,7 @@ export default function Editor() {
       }
       drawingRef.current = false;
     }
-  }, [tool, fgColor, bgColor, brushSize, zoom, playing, aliased, textInput, textFontIdx, textSize]);
+  }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased, textInput, textFontIdx, textSize]);
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
     const pos = getCanvasCoords(e);
@@ -716,7 +865,9 @@ export default function Editor() {
 
     if (tool === "pencil" || tool === "eraser") {
       const last = lastPosRef.current ?? pos;
-      drawLine(ctx, last.x, last.y, pos.x, pos.y, tool === "eraser" ? bgColor : color, brushSize, aliased);
+      const c = tool === "eraser" ? bgColor : color;
+      const shape = tool === "eraser" ? "square" : brushShape;
+      stampLine(ctx, last.x, last.y, pos.x, pos.y, brushSize, c, shape);
       lastPosRef.current = pos;
       saveLiveCanvas();
     } else if (tool === "line" && overlay && startPosRef.current) {
@@ -729,7 +880,7 @@ export default function Editor() {
       overlay.clearRect(0, 0, canvasW, canvasH);
       drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
     }
-  }, [tool, fgColor, bgColor, brushSize, zoom, playing, aliased]);
+  }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased]);
 
   const onMouseUp = useCallback((e: React.MouseEvent) => {
     if (!drawingRef.current) return;
@@ -767,6 +918,7 @@ export default function Editor() {
   const fgColorRef = useRef(fgColor);
   const bgColorRef = useRef(bgColor);
   const brushSizeRef = useRef(brushSize);
+  const brushShapeRef = useRef<BrushShape>(brushShape);
   const zoomRef = useRef(zoom);
   const playingRef = useRef(playing);
   const aliasedRef = useRef(aliased);
@@ -778,6 +930,7 @@ export default function Editor() {
   useEffect(() => { fgColorRef.current = fgColor; }, [fgColor]);
   useEffect(() => { bgColorRef.current = bgColor; }, [bgColor]);
   useEffect(() => { brushSizeRef.current = brushSize; }, [brushSize]);
+  useEffect(() => { brushShapeRef.current = brushShape; }, [brushShape]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => { playingRef.current = playing; }, [playing]);
   useEffect(() => { aliasedRef.current = aliased; }, [aliased]);
@@ -811,7 +964,9 @@ export default function Editor() {
       const color = fgColorRef.current;
       const t = toolRef.current;
       if (t === "pencil" || t === "eraser") {
-        drawPixelRect(ctx, pos.x, pos.y, brushSizeRef.current, t === "eraser" ? bgColorRef.current : color);
+        const c = t === "eraser" ? bgColorRef.current : color;
+        const shape = t === "eraser" ? "square" : brushShapeRef.current;
+        stampBrush(ctx, pos.x, pos.y, brushSizeRef.current, c, shape);
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "fill") {
         floodFill(ctx, pos.x, pos.y, color);
@@ -848,7 +1003,9 @@ export default function Editor() {
       const al = aliasedRef.current;
       if (t === "pencil" || t === "eraser") {
         const last = lastPosRef.current ?? pos;
-        drawLine(ctx, last.x, last.y, pos.x, pos.y, t === "eraser" ? bgColorRef.current : color, sz, al);
+        const c = t === "eraser" ? bgColorRef.current : color;
+        const shape = t === "eraser" ? "square" : brushShapeRef.current;
+        stampLine(ctx, last.x, last.y, pos.x, pos.y, sz, c, shape);
         lastPosRef.current = pos;
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "line" && overlay && startPosRef.current) {
@@ -1272,6 +1429,34 @@ export default function Editor() {
               >
                 <div style={{ width: Math.min(s, 12) + 2, height: Math.min(s, 12) + 2, background: "#000", flexShrink: 0 }} />
                 <span style={{ fontSize: 11, color: "#000", lineHeight: 1, fontFamily: "'VT323', monospace" }}>{s}</span>
+              </button>
+            ))}
+          </div>
+          {/* Brush shape (applies to the pencil) */}
+          <div style={{ marginTop: 8, borderTop: "1px solid #000", paddingTop: 4 }}>
+            <div style={{ color: "#000", fontSize: 10, textAlign: "center", marginBottom: 2 }}>FORME</div>
+            {BRUSH_SHAPES.map(s => (
+              <button
+                key={s.id}
+                className="amiga-button"
+                data-active={brushShape === s.id}
+                onClick={() => setBrushShape(s.id)}
+                title={s.label}
+                style={{
+                  width: "100%",
+                  height: 22,
+                  marginBottom: 2,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 3,
+                  padding: 0,
+                  color: s.id === "bug" ? "#AA0000" : "#000",
+                  fontWeight: s.id === "bug" ? "bold" : "normal",
+                }}
+              >
+                <span style={{ fontSize: 14, lineHeight: 1 }}>{s.icon}</span>
+                <span style={{ fontSize: 9, lineHeight: 1, fontFamily: "'VT323', monospace" }}>{s.label}</span>
               </button>
             ))}
           </div>
