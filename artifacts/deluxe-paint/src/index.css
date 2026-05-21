@@ -1,0 +1,89 @@
+@import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  
+  --color-panel: hsl(var(--panel));
+  --color-panel-text: hsl(var(--panel-text));
+  --color-panel-border-light: hsl(var(--panel-border-light));
+  --color-panel-border-dark: hsl(var(--panel-border-dark));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --font-mono: var(--app-font-mono);
+}
+
+:root {
+  --background: 210 100% 33%; /* #0055AA */
+  --foreground: 0 0% 100%;
+  
+  --panel: 0 0% 66%; /* #AAAAAA */
+  --panel-text: 0 0% 0%;
+  --panel-border-light: 0 0% 100%;
+  --panel-border-dark: 0 0% 0%;
+
+  --primary: 36 100% 50%; /* Orange */
+  --primary-foreground: 0 0% 0%;
+
+  --app-font-mono: 'VT323', monospace;
+  --radius: 0px;
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--panel-border-dark));
+  }
+
+  body {
+    @apply font-mono antialiased bg-background text-foreground overflow-hidden uppercase;
+  }
+}
+
+.amiga-panel {
+  background-color: hsl(var(--panel));
+  color: hsl(var(--panel-text));
+  border-top: 2px solid hsl(var(--panel-border-light));
+  border-left: 2px solid hsl(var(--panel-border-light));
+  border-right: 2px solid hsl(var(--panel-border-dark));
+  border-bottom: 2px solid hsl(var(--panel-border-dark));
+}
+
+.amiga-panel-inset {
+  background-color: hsl(var(--panel));
+  color: hsl(var(--panel-text));
+  border-top: 2px solid hsl(var(--panel-border-dark));
+  border-left: 2px solid hsl(var(--panel-border-dark));
+  border-right: 2px solid hsl(var(--panel-border-light));
+  border-bottom: 2px solid hsl(var(--panel-border-light));
+}
+
+.amiga-button {
+  background-color: hsl(var(--panel));
+  color: hsl(var(--panel-text));
+  border-top: 2px solid hsl(var(--panel-border-light));
+  border-left: 2px solid hsl(var(--panel-border-light));
+  border-right: 2px solid hsl(var(--panel-border-dark));
+  border-bottom: 2px solid hsl(var(--panel-border-dark));
+  cursor: pointer;
+}
+
+.amiga-button:active, .amiga-button[data-active="true"] {
+  border-top: 2px solid hsl(var(--panel-border-dark));
+  border-left: 2px solid hsl(var(--panel-border-dark));
+  border-right: 2px solid hsl(var(--panel-border-light));
+  border-bottom: 2px solid hsl(var(--panel-border-light));
+  background-color: hsl(var(--panel));
+}
+
+.pixelated {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Hide scrollbars */
+::-webkit-scrollbar {
+  display: none;
+}

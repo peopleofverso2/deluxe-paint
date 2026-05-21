@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Deluxe Paint"
+version = "1.0.0"
+id = "artifacts/deluxe-paint"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20730
+
+[services.development]
+run = "pnpm --filter @workspace/deluxe-paint run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/deluxe-paint", "run", "build" ]
+publicDir = "artifacts/deluxe-paint/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20730"
+BASE_PATH = "/"
