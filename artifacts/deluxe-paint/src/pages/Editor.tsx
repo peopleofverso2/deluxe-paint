@@ -174,11 +174,41 @@ const TOOLS: { id: Tool; label: string; icon: string }[] = [
   { id: "fill",         label: "REMPLIR",  icon: "▓" },
   { id: "eyedropper",   label: "PIPETTE",  icon: "⊕" },
   { id: "eraser",       label: "GOMME",    icon: "□" },
+  { id: "text",         label: "TEXTE",    icon: "T" },
 ];
 
 const BRUSH_SIZES = [1, 2, 4, 8];
 // 320 × 12 = 3840 (4K width). Last level fills a 4K display horizontally.
 const ZOOM_LEVELS = [1, 2, 4, 8, 12];
+
+const TEXT_FONTS: { label: string; family: string }[] = [
+  { label: "VT323",  family: "'VT323', monospace" },
+  { label: "8-BIT",  family: "'Press Start 2P', monospace" },
+  { label: "SANS",   family: "'Inter', sans-serif" },
+];
+const TEXT_SIZES = [8, 12, 16, 24, 32, 48];
+
+function stampText(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  color: string,
+  text: string,
+  family: string,
+  size: number,
+  aliased: boolean,
+) {
+  ctx.save();
+  ctx.imageSmoothingEnabled = !aliased;
+  ctx.fillStyle = color;
+  ctx.font = `${size}px ${family}`;
+  ctx.textBaseline = "top";
+  // Without explicit smoothing control, Canvas anti-aliases text.
+  // In aliased mode we drop the antialiasing hint (where supported).
+  if (aliased) (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = "geometricPrecision";
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
 
 export default function Editor() {
   const [tool, setTool] = useState<Tool>("pencil");
@@ -189,6 +219,11 @@ export default function Editor() {
   const [fit, setFit] = useState(true);
   const [aliased, setAliased] = useState(true);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+
+  // Text-tool state (tampon / stamp mode)
+  const [textInput, setTextInput] = useState("TEXTE");
+  const [textFontIdx, setTextFontIdx] = useState(0);
+  const [textSize, setTextSize] = useState(16);
 
   // Animation state
   const [frameCount, setFrameCount] = useState(1);
@@ -530,8 +565,14 @@ export default function Editor() {
       const picked = rgbToHex(pixel[0], pixel[1], pixel[2]);
       if (isRight) setBgColor(picked); else setFgColor(picked);
       drawingRef.current = false;
+    } else if (tool === "text") {
+      if (textInput) {
+        stampText(ctx, pos.x, pos.y, color, textInput, TEXT_FONTS[textFontIdx].family, textSize, aliased);
+        saveLiveCanvas();
+      }
+      drawingRef.current = false;
     }
-  }, [tool, fgColor, bgColor, brushSize, zoom, playing]);
+  }, [tool, fgColor, bgColor, brushSize, zoom, playing, aliased, textInput, textFontIdx, textSize]);
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
     const pos = getCanvasCoords(e);
@@ -599,6 +640,9 @@ export default function Editor() {
   const zoomRef = useRef(zoom);
   const playingRef = useRef(playing);
   const aliasedRef = useRef(aliased);
+  const textInputRef = useRef(textInput);
+  const textFontIdxRef = useRef(textFontIdx);
+  const textSizeRef = useRef(textSize);
 
   useEffect(() => { toolRef.current = tool; }, [tool]);
   useEffect(() => { fgColorRef.current = fgColor; }, [fgColor]);
@@ -607,6 +651,9 @@ export default function Editor() {
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => { playingRef.current = playing; }, [playing]);
   useEffect(() => { aliasedRef.current = aliased; }, [aliased]);
+  useEffect(() => { textInputRef.current = textInput; }, [textInput]);
+  useEffect(() => { textFontIdxRef.current = textFontIdx; }, [textFontIdx]);
+  useEffect(() => { textSizeRef.current = textSize; }, [textSize]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -643,6 +690,13 @@ export default function Editor() {
       } else if (t === "eyedropper") {
         const pixel = ctx.getImageData(pos.x, pos.y, 1, 1).data;
         setFgColor(rgbToHex(pixel[0], pixel[1], pixel[2]));
+        drawingRef.current = false;
+      } else if (t === "text") {
+        const txt = textInputRef.current;
+        if (txt) {
+          stampText(ctx, pos.x, pos.y, color, txt, TEXT_FONTS[textFontIdxRef.current].family, textSizeRef.current, aliasedRef.current);
+          liveDataRef.current = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+        }
         drawingRef.current = false;
       }
     }
@@ -763,7 +817,7 @@ export default function Editor() {
     height: CANVAS_H * zoom,
     imageRendering: aliased ? "pixelated" : "auto",
     display: "block",
-    cursor: tool === "eyedropper" ? "crosshair" : tool === "fill" ? "cell" : "crosshair",
+    cursor: tool === "text" ? "text" : tool === "fill" ? "cell" : "crosshair",
   };
 
   return (
@@ -877,6 +931,63 @@ export default function Editor() {
           </div>
         </div>
       </div>
+
+      {/* TEXT-TOOL CONFIG (visible only when text tool is active) */}
+      {tool === "text" && (
+        <div className="amiga-panel" style={{ flexShrink: 0, borderTop: "2px solid #000", padding: "4px 8px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ color: "#000", fontSize: 14 }}>TEXTE (TAMPON) :</div>
+            <input
+              type="text"
+              value={textInput}
+              onChange={e => setTextInput(e.target.value)}
+              placeholder="Tape ton texte puis clique"
+              style={{
+                background: "#FFF",
+                color: "#000",
+                border: "2px solid #000",
+                padding: "2px 6px",
+                fontFamily: TEXT_FONTS[textFontIdx].family,
+                fontSize: 14,
+                minWidth: 200,
+                flex: "1 1 200px",
+              }}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ color: "#000", fontSize: 14 }}>POLICE :</span>
+              {TEXT_FONTS.map((f, i) => (
+                <button
+                  key={f.label}
+                  className="amiga-button"
+                  data-active={textFontIdx === i}
+                  onClick={() => setTextFontIdx(i)}
+                  style={{ padding: "2px 8px", color: "#000", fontFamily: f.family }}
+                  title={f.label}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ color: "#000", fontSize: 14 }}>TAILLE :</span>
+              {TEXT_SIZES.map(s => (
+                <button
+                  key={s}
+                  className="amiga-button"
+                  data-active={textSize === s}
+                  onClick={() => setTextSize(s)}
+                  style={{ padding: "2px 6px", color: "#000", minWidth: 28 }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+            <div style={{ color: "#555", fontSize: 12, marginLeft: "auto" }}>
+              CLIC SUR LE CANVAS POUR TAMPONNER
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ANIMATION PANEL */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: "2px solid #000", padding: "4px 8px" }}>
