@@ -60,7 +60,7 @@ function drawPixelRect(
 
 // -------------------- Brush shapes --------------------
 
-type BrushShape = "square" | "round" | "diamond" | "cross" | "spray" | "bug";
+type BrushShape = "square" | "round" | "diamond" | "cross" | "spray" | "bug" | "insect";
 
 const BRUSH_SHAPES: { id: BrushShape; label: string; icon: string }[] = [
   { id: "square",  label: "CARRÉ",   icon: "■" },
@@ -69,11 +69,13 @@ const BRUSH_SHAPES: { id: BrushShape; label: string; icon: string }[] = [
   { id: "cross",   label: "CROIX",   icon: "+" },
   { id: "spray",   label: "SPRAY",   icon: "✦" },
   { id: "bug",     label: "BUG",     icon: "⚡" },
+  { id: "insect",  label: "INSECTE", icon: "🐞" },
 ];
 
 // Stamp a single brush at (x, y). `color` is the active foreground; the
 // shape's own random embellishments (spray dots, BUG ghosts) may pick
-// extra colors.
+// extra colors. `angle` (radians) is the heading — only the INSECTE
+// shape currently uses it to face the direction of cursor motion.
 function stampBrush(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -81,6 +83,7 @@ function stampBrush(
   size: number,
   color: string,
   shape: BrushShape,
+  angle: number = 0,
 ) {
   const half = Math.floor(size / 2);
   ctx.fillStyle = color;
@@ -156,6 +159,64 @@ function stampBrush(
       ctx.fillStyle = color;
       return;
     }
+    case "insect": {
+      // Top-down beetle: oval body + round head + 2 antennae + 6 legs.
+      // The whole figure is rotated to face the cursor heading.
+      const s = Math.max(6, size);          // tiny insects look like a dot, enforce a minimum
+      const lw = Math.max(1, s * 0.06);
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      ctx.lineCap = "round";
+      // Legs (drawn first so the body covers their root)
+      const legY = s * 0.28;
+      const legLen = s * 0.45;
+      for (let i = -1; i <= 1; i++) {
+        const lx = i * s * 0.22;
+        // Each pair of legs splays slightly forward / sideways / backward
+        const splay = i * 0.25;
+        // upper leg
+        ctx.beginPath();
+        ctx.moveTo(lx, -legY * 0.6);
+        ctx.lineTo(lx + splay * legLen, -legY - legLen * 0.7);
+        ctx.stroke();
+        // lower leg
+        ctx.beginPath();
+        ctx.moveTo(lx, legY * 0.6);
+        ctx.lineTo(lx + splay * legLen, legY + legLen * 0.7);
+        ctx.stroke();
+      }
+      // Body — long oval pointing forward (positive x)
+      ctx.beginPath();
+      ctx.ellipse(0, 0, s * 0.5, s * 0.3, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Wing case division line down the back
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.45, 0);
+      ctx.lineTo(s * 0.35, 0);
+      ctx.lineWidth = Math.max(1, lw * 0.6);
+      ctx.strokeStyle = "rgba(0,0,0,0.5)";
+      ctx.stroke();
+      // Head — small disc at the front
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(s * 0.55, 0, s * 0.18, 0, Math.PI * 2);
+      ctx.fill();
+      // Antennae
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(s * 0.66, -s * 0.06);
+      ctx.lineTo(s * 0.95, -s * 0.32);
+      ctx.moveTo(s * 0.66, s * 0.06);
+      ctx.lineTo(s * 0.95, s * 0.32);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
   }
 }
 
@@ -170,7 +231,8 @@ function stampLine(
   size: number,
   color: string,
   shape: BrushShape,
-) {
+  fallbackAngle: number = 0,
+): number {
   // Tiny square brush keeps the old fast path — drawLine with strokes is
   // crisper than stamping squares pixel-by-pixel and is what the original
   // pencil expected.
@@ -182,19 +244,27 @@ function stampLine(
     ctx.moveTo(x0 + 0.5, y0 + 0.5);
     ctx.lineTo(x1 + 0.5, y1 + 0.5);
     ctx.stroke();
-    return;
+    return fallbackAngle;
   }
-  const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  // Heading for directional shapes (insect) — derived from the segment,
+  // falls back to the caller's last-known angle when start==end.
+  const segDx = x1 - x0, segDy = y1 - y0;
+  const angle = (segDx === 0 && segDy === 0) ? fallbackAngle : Math.atan2(segDy, segDx);
+
+  // For the insect brush we space stamps further apart so the line of
+  // bugs doesn't overlap into mush; ~size apart works well.
+  const insectStep = Math.max(2, Math.round(size * 0.8));
+
+  const dx = Math.abs(segDx), dy = Math.abs(segDy);
   const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
   let err = dx - dy;
   let x = x0, y = y0;
-  const step = Math.max(1, Math.floor(size / 4));
+  const step = shape === "insect" ? insectStep : Math.max(1, Math.floor(size / 4));
   let i = 0;
-  // safety cap to avoid pathological loops on bogus inputs
   const limit = (dx + dy) * 2 + 8;
   while (i <= limit) {
     if (i === 0 || i % step === 0 || (x === x1 && y === y1)) {
-      stampBrush(ctx, x, y, size, color, shape);
+      stampBrush(ctx, x, y, size, color, shape, angle);
     }
     if (x === x1 && y === y1) break;
     const e2 = 2 * err;
@@ -202,6 +272,7 @@ function stampLine(
     if (e2 < dx)  { err += dx; y += sy; }
     i++;
   }
+  return angle;
 }
 
 function drawLine(
@@ -503,6 +574,7 @@ export default function Editor() {
   const drawingRef = useRef(false);
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
+  const lastAngleRef = useRef(0); // remembered cursor heading — directional brushes (INSECTE) reuse it for the down-stamp
   const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const currentFrameRef = useRef(0);
   const frameCountRef = useRef(1);
@@ -832,7 +904,8 @@ export default function Editor() {
     if (tool === "pencil" || tool === "eraser") {
       const c = tool === "eraser" ? bgColor : color;
       // Eraser always uses a plain square; brush shapes are for the pencil.
-      stampBrush(ctx, pos.x, pos.y, brushSize, c, tool === "eraser" ? "square" : brushShape);
+      const shape: BrushShape = tool === "eraser" ? "square" : brushShape;
+      stampBrush(ctx, pos.x, pos.y, brushSize, c, shape, lastAngleRef.current);
       saveLiveCanvas();
     } else if (tool === "fill") {
       floodFill(ctx, pos.x, pos.y, color);
@@ -866,8 +939,8 @@ export default function Editor() {
     if (tool === "pencil" || tool === "eraser") {
       const last = lastPosRef.current ?? pos;
       const c = tool === "eraser" ? bgColor : color;
-      const shape = tool === "eraser" ? "square" : brushShape;
-      stampLine(ctx, last.x, last.y, pos.x, pos.y, brushSize, c, shape);
+      const shape: BrushShape = tool === "eraser" ? "square" : brushShape;
+      lastAngleRef.current = stampLine(ctx, last.x, last.y, pos.x, pos.y, brushSize, c, shape, lastAngleRef.current);
       lastPosRef.current = pos;
       saveLiveCanvas();
     } else if (tool === "line" && overlay && startPosRef.current) {
@@ -965,8 +1038,8 @@ export default function Editor() {
       const t = toolRef.current;
       if (t === "pencil" || t === "eraser") {
         const c = t === "eraser" ? bgColorRef.current : color;
-        const shape = t === "eraser" ? "square" : brushShapeRef.current;
-        stampBrush(ctx, pos.x, pos.y, brushSizeRef.current, c, shape);
+        const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
+        stampBrush(ctx, pos.x, pos.y, brushSizeRef.current, c, shape, lastAngleRef.current);
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "fill") {
         floodFill(ctx, pos.x, pos.y, color);
@@ -1004,8 +1077,8 @@ export default function Editor() {
       if (t === "pencil" || t === "eraser") {
         const last = lastPosRef.current ?? pos;
         const c = t === "eraser" ? bgColorRef.current : color;
-        const shape = t === "eraser" ? "square" : brushShapeRef.current;
-        stampLine(ctx, last.x, last.y, pos.x, pos.y, sz, c, shape);
+        const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
+        lastAngleRef.current = stampLine(ctx, last.x, last.y, pos.x, pos.y, sz, c, shape, lastAngleRef.current);
         lastPosRef.current = pos;
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "line" && overlay && startPosRef.current) {
