@@ -913,6 +913,9 @@ export default function Editor() {
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
   const lastAngleRef = useRef(0); // remembered cursor heading — directional brushes (INSECTE) reuse it for the down-stamp
   const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const playRafRef = useRef<number | null>(null);
+  const playLastTimeRef = useRef<number>(0);
+  const playAccumRef = useRef<number>(0);
   const currentFrameRef = useRef(0);
   const frameCountRef = useRef(1);
   const fpsRef = useRef(fps);
@@ -1064,6 +1067,24 @@ export default function Editor() {
     const c = compositeFrameToCanvas(idx);
     return c.getContext("2d")!.getImageData(0, 0, c.width, c.height);
   }
+
+  // Thumbnail cache — re-using composites during PLAYBACK kills the
+  // per-tick cost (otherwise FrameThumbs recompute compositeFrameToImageData
+  // for every frame × every layer on every render, which at HD/4K turns
+  // PLAY into a slideshow). Cache is per frame index; flushed on layer
+  // mutations (handled via layerVersion bumps which trigger re-render).
+  const thumbCacheRef = useRef<Map<number, ImageData>>(new Map());
+  function getThumbForRender(i: number): ImageData {
+    // While playing, prefer the cached snapshot to avoid 60+ MB/s of
+    // composite work per second on bigger canvases.
+    if (playing) {
+      const c = thumbCacheRef.current.get(i);
+      if (c) return c;
+    }
+    const fresh = compositeFrameToImageData(i);
+    thumbCacheRef.current.set(i, fresh);
+    return fresh;
+  }
   // Project-wide frame count is derived from the first layer's frames.
   function frameCountOf() { return layersRef.current[0]?.frames.length ?? 1; }
   // Returns true if any layer has any non-null frame (used to decide
@@ -1159,38 +1180,47 @@ export default function Editor() {
 
   // Animation playback
   function startPlayback() {
-    if (playIntervalRef.current) clearInterval(playIntervalRef.current);
-    saveCurrentFrame();
+    // requestAnimationFrame + a time accumulator gives smoother frame
+    // timing than setInterval (which drifts and queues backed-up calls
+    // when a tick takes longer than the interval).
+    if (playRafRef.current != null) cancelAnimationFrame(playRafRef.current);
+    if (playIntervalRef.current) { clearInterval(playIntervalRef.current); playIntervalRef.current = null; }
     setPlaying(true);
     let f = currentFrameRef.current;
-    const tick = () => {
-      // Persist any live edits made on the current frame before advancing
-      saveCurrentFrame();
-      const n = frameCountRef.current;
-      const dir = playDirRef.current;
-      const next = (f + dir + n) % n;
-      // Non-looping mode: stop when we wrap past the boundary
-      if (!loopingRef.current) {
-        if ((dir > 0 && next === 0) || (dir < 0 && next === n - 1)) {
+    playLastTimeRef.current = performance.now();
+    playAccumRef.current = 0;
+    const loop = (now: number) => {
+      const dt = now - playLastTimeRef.current;
+      playLastTimeRef.current = now;
+      playAccumRef.current += dt;
+      const interval = Math.max(20, 1000 / (fpsRef.current * playSpeedRef.current));
+      // Catch up by at most a few frames to avoid death-spirals on slow tabs
+      let safety = 4;
+      while (playAccumRef.current >= interval && safety-- > 0) {
+        playAccumRef.current -= interval;
+        const n = frameCountRef.current;
+        const dir = playDirRef.current;
+        const next = (f + dir + n) % n;
+        if (!loopingRef.current && ((dir > 0 && next === 0) || (dir < 0 && next === n - 1))) {
           stopPlayback();
           return;
         }
+        f = next;
+        currentFrameRef.current = f;
+        setCurrentFrame(f);
+        composite();
       }
-      f = next;
-      currentFrameRef.current = f;
-      setCurrentFrame(f);
-      loadFrame(f);
+      // If we skipped ahead because of large dt, drop the remainder so we
+      // don't keep stuttering
+      if (playAccumRef.current > interval * 4) playAccumRef.current = 0;
+      playRafRef.current = requestAnimationFrame(loop);
     };
-    const interval = Math.max(20, 1000 / (fpsRef.current * playSpeedRef.current));
-    playIntervalRef.current = setInterval(tick, interval);
+    playRafRef.current = requestAnimationFrame(loop);
   }
 
   function stopPlayback() {
-    if (playIntervalRef.current) {
-      clearInterval(playIntervalRef.current);
-      playIntervalRef.current = null;
-    }
-    saveCurrentFrame();
+    if (playIntervalRef.current) { clearInterval(playIntervalRef.current); playIntervalRef.current = null; }
+    if (playRafRef.current != null) { cancelAnimationFrame(playRafRef.current); playRafRef.current = null; }
     setPlaying(false);
   }
 
@@ -1289,7 +1319,10 @@ export default function Editor() {
   }, []);
 
   // Stop playback on unmount
-  useEffect(() => () => { if (playIntervalRef.current) clearInterval(playIntervalRef.current); }, []);
+  useEffect(() => () => {
+    if (playIntervalRef.current) clearInterval(playIntervalRef.current);
+    if (playRafRef.current != null) cancelAnimationFrame(playRafRef.current);
+  }, []);
 
   // Add blank frame
   function addFrame() {
@@ -3264,7 +3297,7 @@ export default function Editor() {
                 key={`${i}-${layerVersion}`}
                 index={i}
                 current={currentFrame === i}
-                frameData={compositeFrameToImageData(i)}
+                frameData={getThumbForRender(i)}
                 onClick={() => !playing && switchToFrame(i)}
               />
             ))}
