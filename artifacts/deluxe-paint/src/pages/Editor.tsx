@@ -799,6 +799,10 @@ export default function Editor() {
   const selectModeRef = useRef(selectMode);
   // In-progress lasso path while dragging
   const lassoPointsRef = useRef<{ x: number; y: number }[]>([]);
+  // While the user is dragging an existing selection: the lifted pixels +
+  // the original sel position and the mouse-down position. Cleared on
+  // mouseup (commits the float) or cancellation.
+  const movingRef = useRef<{ float: HTMLCanvasElement; startMouseX: number; startMouseY: number; startSelX: number; startSelY: number } | null>(null);
   // Clipboard for copy/paste. Stored as an offscreen canvas so masked
   // (lasso) copies keep their alpha; .x/.y remember the original position
   // so PASTE can drop it back in place.
@@ -1175,8 +1179,15 @@ export default function Editor() {
       }
       drawingRef.current = false;
     } else if (tool === "select") {
-      // Start defining a new selection — keep drawingRef true so move
-      // events extend it; mouseUp commits to state. For lasso, seed the
+      // Existing selection + mouse inside → enter MOVE mode (lift pixels)
+      const sel = selectionRef.current;
+      if (sel && selectionHit(sel, pos.x, pos.y)) {
+        liftSelection(sel, pos.x, pos.y);
+        renderFloat(pos.x, pos.y);
+        // drawingRef stays true so move/up are recognized as a drag
+        return;
+      }
+      // Otherwise start defining a new selection. For lasso, seed the
       // points list with the down position.
       setSelection(null);
       if (selectMode === "lasso") {
@@ -1189,6 +1200,11 @@ export default function Editor() {
     const pos = getCanvasCoords(e);
     setMousePos(pos);
     if (!drawingRef.current) return;
+    // Move mode takes priority — float follows the cursor on the overlay
+    if (movingRef.current) {
+      renderFloat(pos.x, pos.y);
+      return;
+    }
     const isRight = e.buttons === 2;
     const color = isRight ? bgColor : fgColor;
     const ctx = getCtx();
@@ -1250,9 +1266,14 @@ export default function Editor() {
   const onMouseUp = useCallback((e: React.MouseEvent) => {
     if (!drawingRef.current) return;
     drawingRef.current = false;
+    const pos = getCanvasCoords(e);
+    // Move mode wins: commit the float then bail out
+    if (movingRef.current) {
+      commitMove(pos.x, pos.y);
+      return;
+    }
     const isRight = e.button === 2;
     const color = isRight ? bgColor : fgColor;
-    const pos = getCanvasCoords(e);
     const ctx = getCtx();
     const overlay = getOverlayCtx();
 
@@ -1404,7 +1425,25 @@ export default function Editor() {
         if (clipboardRef.current) { pasteClipboard(); e.preventDefault(); }
       } else if (selectionRef.current) {
         if (e.key === "Escape") {
-          setSelection(null); e.preventDefault();
+          // If actively moving, restore pixels at the original position
+          if (movingRef.current) {
+            const m = movingRef.current;
+            const ctx = getCtx();
+            if (ctx) {
+              ctx.save();
+              ctx.imageSmoothingEnabled = false;
+              ctx.drawImage(m.float, m.startSelX, m.startSelY);
+              ctx.restore();
+              saveLiveCanvas();
+              saveCurrentFrame();
+            }
+            movingRef.current = null;
+            drawingRef.current = false;
+            const overlay = getOverlayCtx();
+            if (overlay) overlay.clearRect(0, 0, canvasW, canvasH);
+          }
+          setSelection(null);
+          e.preventDefault();
         } else if (e.key === "Delete" || e.key === "Backspace") {
           eraseSelection(); e.preventDefault();
         }
@@ -1461,6 +1500,17 @@ export default function Editor() {
           liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
         }
         drawingRef.current = false;
+      } else if (t === "select") {
+        const sel = selectionRef.current;
+        if (sel && selectionHit(sel, pos.x, pos.y)) {
+          liftSelection(sel, pos.x, pos.y);
+          renderFloat(pos.x, pos.y);
+        } else {
+          setSelection(null);
+          if (selectModeRef.current === "lasso") {
+            lassoPointsRef.current = [{ x: pos.x, y: pos.y }];
+          }
+        }
       }
     }
 
@@ -1471,6 +1521,8 @@ export default function Editor() {
       if (!touch) return;
       const pos = getTouchPos(touch);
       setMousePos(pos);
+      lastPosRef.current = pos; // tracked so touchEnd has a final position for move
+      if (movingRef.current) { renderFloat(pos.x, pos.y); return; }
       const ctx = getCtx();
       const overlay = getOverlayCtx();
       if (!ctx) return;
@@ -1501,6 +1553,11 @@ export default function Editor() {
       if (!drawingRef.current) return;
       e.preventDefault();
       drawingRef.current = false;
+      if (movingRef.current) {
+        const pos = lastPosRef.current ?? startPosRef.current ?? { x: 0, y: 0 };
+        commitMove(pos.x, pos.y);
+        return;
+      }
       const ctx = getCtx();
       const overlay = getOverlayCtx();
       if (!ctx || !startPosRef.current) return;
@@ -1673,6 +1730,92 @@ export default function Editor() {
     saveCurrentFrame();
     setSelection({ kind: "rect", x: cb.x, y: cb.y, w: cb.canvas.width, h: cb.canvas.height });
     setTool("select");
+  }
+
+  // Test whether a canvas-space point falls inside the current selection.
+  function selectionHit(sel: Selection, x: number, y: number): boolean {
+    if (sel.kind === "rect") {
+      return x >= sel.x && x < sel.x + sel.w && y >= sel.y && y < sel.y + sel.h;
+    }
+    const ov = getOverlayCtx();
+    if (!ov) return false;
+    return ov.isPointInPath(selectionPath(sel), x, y);
+  }
+
+  // Lift the selection's pixels into a float canvas and erase the source
+  // so the user sees the float "detach" from the frame as they drag.
+  function liftSelection(sel: Selection, mouseX: number, mouseY: number) {
+    const src = canvasRef.current;
+    const ctx = getCtx();
+    if (!src || !ctx) return;
+    const b = sel.kind === "rect" ? sel : sel.bbox;
+    const off = document.createElement("canvas");
+    off.width = b.w;
+    off.height = b.h;
+    const octx = off.getContext("2d")!;
+    octx.imageSmoothingEnabled = false;
+    if (sel.kind === "lasso") {
+      const local = new Path2D();
+      local.moveTo(sel.points[0].x - b.x, sel.points[0].y - b.y);
+      for (let i = 1; i < sel.points.length; i++) local.lineTo(sel.points[i].x - b.x, sel.points[i].y - b.y);
+      local.closePath();
+      octx.save();
+      octx.clip(local);
+      octx.drawImage(src, -b.x, -b.y);
+      octx.restore();
+    } else {
+      octx.drawImage(src, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+    }
+    // Erase original area on the frame
+    ctx.save();
+    if (sel.kind === "lasso") ctx.clip(selectionPath(sel));
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.restore();
+    saveLiveCanvas();
+    movingRef.current = { float: off, startMouseX: mouseX, startMouseY: mouseY, startSelX: b.x, startSelY: b.y };
+  }
+
+  // Paint the float at the current cursor offset on the overlay (preview).
+  function renderFloat(curX: number, curY: number) {
+    const m = movingRef.current;
+    const overlay = getOverlayCtx();
+    if (!m || !overlay) return;
+    overlay.clearRect(0, 0, canvasW, canvasH);
+    overlay.save();
+    overlay.imageSmoothingEnabled = false;
+    overlay.drawImage(m.float, m.startSelX + (curX - m.startMouseX), m.startSelY + (curY - m.startMouseY));
+    overlay.restore();
+  }
+
+  // Drop the float onto the frame at the final position and shift the
+  // selection accordingly so subsequent actions act on the new spot.
+  function commitMove(endX: number, endY: number) {
+    const m = movingRef.current;
+    const ctx = getCtx();
+    if (!m || !ctx) { movingRef.current = null; return; }
+    const dx = endX - m.startMouseX;
+    const dy = endY - m.startMouseY;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(m.float, m.startSelX + dx, m.startSelY + dy);
+    ctx.restore();
+    saveLiveCanvas();
+    saveCurrentFrame();
+    // Shift the selection by (dx, dy)
+    const sel = selectionRef.current;
+    if (sel) {
+      if (sel.kind === "rect") {
+        setSelection({ kind: "rect", x: sel.x + dx, y: sel.y + dy, w: sel.w, h: sel.h });
+      } else {
+        setSelection({
+          kind: "lasso",
+          points: sel.points.map(p => ({ x: p.x + dx, y: p.y + dy })),
+          bbox: { x: sel.bbox.x + dx, y: sel.bbox.y + dy, w: sel.bbox.w, h: sel.bbox.h },
+        });
+      }
+    }
+    movingRef.current = null;
   }
 
   // Nearest-neighbor rescale via an offscreen canvas (imageSmoothingEnabled off).
@@ -1930,7 +2073,17 @@ export default function Editor() {
     height: canvasH * zoom,
     imageRendering: aliased ? "pixelated" : "auto",
     display: "block",
-    cursor: tool === "text" ? "text" : tool === "fill" ? "cell" : tool === "select" ? "crosshair" : "crosshair",
+    cursor:
+      tool === "text" ? "text"
+      : tool === "fill" ? "cell"
+      : (tool === "select" && selection && mousePos && (
+          selection.kind === "rect"
+            ? (mousePos.x >= selection.x && mousePos.x < selection.x + selection.w &&
+               mousePos.y >= selection.y && mousePos.y < selection.y + selection.h)
+            : (mousePos.x >= selection.bbox.x && mousePos.x < selection.bbox.x + selection.bbox.w &&
+               mousePos.y >= selection.bbox.y && mousePos.y < selection.bbox.y + selection.bbox.h)
+        )) ? "move"
+      : "crosshair",
   };
 
   return (
