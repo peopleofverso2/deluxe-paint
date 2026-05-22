@@ -33,30 +33,37 @@
   --radius: 0px;
 }
 
-/* NIGHT theme — dark with red accent. Applied when the editor root
-   has data-theme="night". */
+/* NIGHT theme — chic / sober. Warm cream on near-black with a muted
+   burgundy accent reserved for highlight states. Structural borders are
+   charcoal (not red) so the chrome reads as discreet rather than
+   strapped together with red filets. */
 [data-theme="night"] {
-  --background: 0 0% 4%;        /* #0A0A0A */
-  --foreground: 36 14% 93%;     /* cream text on dark */
+  --background: 0 0% 6%;        /* #0E0E0E warm near-black */
+  --foreground: 30 25% 87%;     /* #E8DDD0 warm cream */
 
-  --panel: 0 0% 10%;            /* #1A1A1A */
-  --panel-text: 36 14% 93%;     /* cream */
-  --panel-border-light: 0 80% 56%;  /* red highlight edge */
-  --panel-border-dark: 0 80% 36%;   /* darker red shadow edge */
+  --panel: 0 0% 9%;             /* #181818 panel */
+  --panel-text: 30 25% 87%;
+  --panel-border-light: 0 0% 22%;   /* subtle charcoal highlight edge */
+  --panel-border-dark: 0 0% 6%;     /* very dark shadow edge */
 
-  --primary: 0 100% 56%;        /* #FF3030 red accent */
-  --primary-foreground: 0 0% 0%;
+  --primary: 0 47% 52%;         /* #C04849 muted burgundy */
+  --primary-foreground: 30 25% 92%;
 }
 
-[data-theme="night"] body { background: #0A0A0A; color: #F0EFED; }
+[data-theme="night"] body { background: #0E0E0E; color: #E8DDD0; }
 [data-theme="night"] input[type="number"],
 [data-theme="night"] input[type="text"] {
-  background: #1A1A1A !important;
-  color: #F0EFED !important;
-  border-color: #FF3030 !important;
+  background: #1F1F1F !important;
+  color: #E8DDD0 !important;
+  border-color: #2A2A2A !important;
+}
+[data-theme="night"] input[type="number"]:focus,
+[data-theme="night"] input[type="text"]:focus {
+  outline: none;
+  border-color: #C04849 !important;
 }
 [data-theme="night"] input[type="range"] {
-  accent-color: #FF3030;
+  accent-color: #C04849;
 }
 
 @layer base {

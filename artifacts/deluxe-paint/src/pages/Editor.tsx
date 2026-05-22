@@ -98,16 +98,18 @@ const THEMES: Record<ThemeId, ThemeColors> = {
     border: "#000000",
   },
   night: {
-    bg: "#0A0A0A",
-    panel: "#1A1A1A",
-    panelText: "#F0EFED",
-    // Dark menubar with the red as an accent underline (cleaner contrast
-    // for the buttons sitting on top of it than a full-red bar).
-    menubar: "#141414",
-    menubarText: "#F0EFED",
+    // Refined / chic-sober palette. Warm near-black bg, slightly warmer
+    // panel, off-white cream text. Accent is a deep burgundy red used
+    // sparingly; structural borders are barely-there charcoal so the
+    // chrome reads as discreet rather than fenced-in by red lines.
+    bg: "#0E0E0E",
+    panel: "#181818",
+    panelText: "#E8DDD0",
+    menubar: "#121212",
+    menubarText: "#E8DDD0",
     canvasBg: "#000000",
-    accent: "#FF3030",
-    border: "#FF3030",
+    accent: "#C04849",         // muted burgundy
+    border: "#2A2A2A",         // subtle charcoal, not red
   },
 };
 
@@ -1580,7 +1582,7 @@ export default function Editor() {
       {splashOpen && <SplashScreen theme={t} onDismiss={() => setSplashOpen(false)} />}
 
       {/* MENUBAR */}
-      <div style={{ display: "flex", alignItems: "center", background: t.menubar, borderBottom: `2px solid ${t.border}`, padding: "0 4px", flexShrink: 0, height: 28 }}>
+      <div style={{ display: "flex", alignItems: "center", background: t.menubar, borderBottom: `1px solid ${t.border}`, padding: "0 4px", flexShrink: 0, height: 28 }}>
         <MenuDropdown label="IMAGE" items={(() => {
           const animOk = canvasW <= ANIM_EXPORT_MAX_W;
           const animSuffix = animOk ? "" : ` — désactivé en ${canvasW}×${canvasH}`;
