@@ -144,14 +144,14 @@ function drawPixelRect(
 
 type BrushShape = "square" | "round" | "diamond" | "cross" | "spray" | "bug" | "insect";
 
-const BRUSH_SHAPES: { id: BrushShape; label: string; icon: string }[] = [
-  { id: "square",  label: "CARRÉ",   icon: "■" },
-  { id: "round",   label: "ROND",    icon: "●" },
-  { id: "diamond", label: "DIAMANT", icon: "◆" },
-  { id: "cross",   label: "CROIX",   icon: "+" },
-  { id: "spray",   label: "SPRAY",   icon: "✦" },
-  { id: "bug",     label: "BUG",     icon: "⚡" },
-  { id: "insect",  label: "INSECTE", icon: "🐞" },
+const BRUSH_SHAPES: { id: BrushShape; label: string; icon: IconName }[] = [
+  { id: "square",  label: "CARRÉ",   icon: "shape-square" },
+  { id: "round",   label: "ROND",    icon: "shape-round" },
+  { id: "diamond", label: "DIAMANT", icon: "shape-diamond" },
+  { id: "cross",   label: "CROIX",   icon: "shape-cross" },
+  { id: "spray",   label: "SPRAY",   icon: "shape-spray" },
+  { id: "bug",     label: "BUG",     icon: "shape-bug" },
+  { id: "insect",  label: "INSECTE", icon: "shape-insect" },
 ];
 
 // Stamp a single brush at (x, y). `color` is the active foreground; the
@@ -551,17 +551,130 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-const TOOLS: { id: Tool; label: string; icon: string }[] = [
-  { id: "pencil",       label: "CRAYON",   icon: "✏" },
-  { id: "line",         label: "LIGNE",    icon: "╱" },
-  { id: "rect",         label: "RECT",     icon: "▭" },
-  { id: "rect-fill",   label: "RECT PL",  icon: "▬" },
-  { id: "ellipse",      label: "ELLIPSE",  icon: "○" },
-  { id: "ellipse-fill", label: "ELLIPSE PL", icon: "●" },
-  { id: "fill",         label: "REMPLIR",  icon: "▓" },
-  { id: "eyedropper",   label: "PIPETTE",  icon: "⊕" },
-  { id: "eraser",       label: "GOMME",    icon: "□" },
-  { id: "text",         label: "TEXTE",    icon: "T" },
+type IconName =
+  | "pencil" | "line" | "rect" | "rect-fill" | "ellipse" | "ellipse-fill"
+  | "fill" | "eyedropper" | "eraser" | "text"
+  | "shape-square" | "shape-round" | "shape-diamond" | "shape-cross"
+  | "shape-spray" | "shape-bug" | "shape-insect";
+
+// Inline pixel-style SVG icons. All use currentColor so they pick up the
+// theme automatically (cream in night mode, black in light mode). Drawn
+// on a 24x24 grid with crispEdges for the chunky feel.
+function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "square" as const,
+    strokeLinejoin: "miter" as const,
+    shapeRendering: "geometricPrecision" as const,
+    "aria-hidden": true,
+  };
+  switch (name) {
+    case "pencil": return (
+      <svg {...common}><path d="M3 21 L7 17 L17 7 L17 7 L20 4 L20 4 L17 7" /><path d="M14 7 L17 10" /><path d="M3 21 L7 17" /></svg>
+    );
+    case "line": return (
+      <svg {...common}><path d="M4 20 L20 4" /></svg>
+    );
+    case "rect": return (
+      <svg {...common}><rect x="4" y="6" width="16" height="12" /></svg>
+    );
+    case "rect-fill": return (
+      <svg {...common} fill="currentColor"><rect x="4" y="6" width="16" height="12" /></svg>
+    );
+    case "ellipse": return (
+      <svg {...common}><ellipse cx="12" cy="12" rx="8" ry="6" /></svg>
+    );
+    case "ellipse-fill": return (
+      <svg {...common} fill="currentColor"><ellipse cx="12" cy="12" rx="8" ry="6" stroke="none" /></svg>
+    );
+    case "fill": return (
+      // Paint bucket: tilted bucket + drop
+      <svg {...common}>
+        <path d="M5 11 L13 3 L21 11 L13 19 Z" />
+        <path d="M5 11 L13 19" />
+        <circle cx="19" cy="18" r="2" fill="currentColor" stroke="none" />
+      </svg>
+    );
+    case "eyedropper": return (
+      // Dropper barrel + tip
+      <svg {...common}>
+        <path d="M14 4 L20 10" />
+        <path d="M16 6 L8 14 L6 18 L4 20 L6 18 L10 16 L18 8" />
+      </svg>
+    );
+    case "eraser": return (
+      // Slanted rubber + crumbs
+      <svg {...common}>
+        <path d="M4 18 L12 10 L18 16 L14 20 L6 20 Z" />
+        <path d="M9 13 L15 19" />
+      </svg>
+    );
+    case "text": return (
+      <svg {...common}><path d="M6 5 L18 5 M12 5 L12 19 M9 19 L15 19" strokeWidth={2} /></svg>
+    );
+
+    // ---- brush shapes ----
+    case "shape-square": return (
+      <svg {...common} fill="currentColor"><rect x="5" y="5" width="14" height="14" stroke="none" /></svg>
+    );
+    case "shape-round": return (
+      <svg {...common} fill="currentColor"><circle cx="12" cy="12" r="7" stroke="none" /></svg>
+    );
+    case "shape-diamond": return (
+      <svg {...common} fill="currentColor"><polygon points="12,3 21,12 12,21 3,12" stroke="none" /></svg>
+    );
+    case "shape-cross": return (
+      <svg {...common} fill="currentColor"><path d="M10 3 H14 V10 H21 V14 H14 V21 H10 V14 H3 V10 H10 Z" stroke="none" /></svg>
+    );
+    case "shape-spray": return (
+      // Scattered dots
+      <svg {...common} fill="currentColor" stroke="none">
+        <circle cx="12" cy="12" r="2.5" />
+        <circle cx="6" cy="9" r="1" /><circle cx="9" cy="5" r="1" /><circle cx="16" cy="6" r="1" />
+        <circle cx="19" cy="11" r="1" /><circle cx="18" cy="17" r="1" /><circle cx="12" cy="20" r="1" />
+        <circle cx="5" cy="16" r="1" /><circle cx="4" cy="13" r="0.8" /><circle cx="15" cy="14" r="1" />
+        <circle cx="9" cy="17" r="0.8" /><circle cx="20" cy="14" r="0.6" />
+      </svg>
+    );
+    case "shape-bug": return (
+      // Glitch: stacked offset rectangles
+      <svg {...common} stroke="none">
+        <rect x="5" y="5" width="12" height="12" fill="currentColor" opacity="0.4" />
+        <rect x="7" y="7" width="12" height="12" fill="currentColor" />
+        <rect x="3" y="11" width="18" height="2" fill="currentColor" opacity="0.6" />
+      </svg>
+    );
+    case "shape-insect": return (
+      // Beetle: oval body + head + antennae + legs, facing right
+      <svg {...common}>
+        <ellipse cx="11" cy="12" rx="6" ry="4" fill="currentColor" stroke="none" />
+        <circle cx="17" cy="12" r="2.2" fill="currentColor" stroke="none" />
+        {/* antennae */}
+        <path d="M18.5 11 L22 8 M18.5 13 L22 16" strokeWidth={1.2} />
+        {/* legs */}
+        <path d="M8 8 L5 5 M11 8 L11 4 M14 8 L17 4" strokeWidth={1.2} />
+        <path d="M8 16 L5 19 M11 16 L11 20 M14 16 L17 20" strokeWidth={1.2} />
+      </svg>
+    );
+  }
+}
+
+const TOOLS: { id: Tool; label: string; icon: IconName }[] = [
+  { id: "pencil",       label: "CRAYON",     icon: "pencil" },
+  { id: "line",         label: "LIGNE",      icon: "line" },
+  { id: "rect",         label: "RECT",       icon: "rect" },
+  { id: "rect-fill",    label: "RECT PL",    icon: "rect-fill" },
+  { id: "ellipse",      label: "ELLIPSE",    icon: "ellipse" },
+  { id: "ellipse-fill", label: "ELLIPSE PL", icon: "ellipse-fill" },
+  { id: "fill",         label: "REMPLIR",    icon: "fill" },
+  { id: "eyedropper",   label: "PIPETTE",    icon: "eyedropper" },
+  { id: "eraser",       label: "GOMME",      icon: "eraser" },
+  { id: "text",         label: "TEXTE",      icon: "text" },
 ];
 
 const BRUSH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128];
@@ -1563,12 +1676,12 @@ export default function Editor() {
               data-active={tool === t.id}
               title={t.label}
               onClick={() => setTool(t.id)}
-              style={{ width: "100%", height: 36, fontSize: 20, padding: 0 }}
+              style={{ width: "100%", height: 36, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "inherit" }}
             >
-              {t.icon}
+              <Icon name={t.icon} size={22} />
             </button>
           ))}
-          <div style={{ marginTop: 8, borderTop: "1px solid #000", paddingTop: 4 }}>
+          <div style={{ marginTop: 8, borderTop: `1px solid ${t.border}`, paddingTop: 4 }}>
             <div style={{ color: "#000", fontSize: 10, textAlign: "center", marginBottom: 2 }}>TAILLE</div>
             <input
               type="number"
@@ -1587,7 +1700,7 @@ export default function Editor() {
                 boxSizing: "border-box",
                 background: "#FFF",
                 color: "#000",
-                border: "2px solid #000",
+                border: `1px solid ${t.border}`,
                 padding: "2px 2px",
                 fontFamily: "'VT323', monospace",
                 fontSize: 14,
@@ -1610,7 +1723,7 @@ export default function Editor() {
             ))}
           </div>
           {/* Brush shape (applies to the pencil) */}
-          <div style={{ marginTop: 8, borderTop: "1px solid #000", paddingTop: 4 }}>
+          <div style={{ marginTop: 8, borderTop: `1px solid ${t.border}`, paddingTop: 4 }}>
             <div style={{ color: "#000", fontSize: 10, textAlign: "center", marginBottom: 2 }}>FORME</div>
             {BRUSH_SHAPES.map(s => (
               <button
@@ -1621,28 +1734,28 @@ export default function Editor() {
                 title={s.label}
                 style={{
                   width: "100%",
-                  height: 22,
+                  height: 26,
                   marginBottom: 2,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  gap: 3,
+                  gap: 4,
                   padding: 0,
-                  color: s.id === "bug" ? "#AA0000" : "#000",
+                  color: s.id === "bug" ? "#E61B1B" : "inherit",
                   fontWeight: s.id === "bug" ? "bold" : "normal",
                 }}
               >
-                <span style={{ fontSize: 14, lineHeight: 1 }}>{s.icon}</span>
-                <span style={{ fontSize: 9, lineHeight: 1, fontFamily: "'VT323', monospace" }}>{s.label}</span>
+                <Icon name={s.icon} size={16} />
+                <span style={{ fontSize: 10, lineHeight: 1, fontFamily: "'VT323', monospace", letterSpacing: 0.5 }}>{s.label}</span>
               </button>
             ))}
           </div>
           {/* Color swatches */}
-          <div style={{ marginTop: 8, borderTop: "1px solid #000", paddingTop: 4 }}>
+          <div style={{ marginTop: 8, borderTop: `1px solid ${t.border}`, paddingTop: 4 }}>
             <div style={{ position: "relative", width: 46, height: 36 }}>
-              <div style={{ position: "absolute", right: 0, bottom: 0, width: 24, height: 24, background: bgColor, border: "2px solid #000", cursor: "pointer" }}
+              <div style={{ position: "absolute", right: 0, bottom: 0, width: 24, height: 24, background: bgColor, border: `1px solid ${t.border}`, cursor: "pointer" }}
                 title="Couleur de fond (clic droit)" />
-              <div style={{ position: "absolute", left: 0, top: 0, width: 24, height: 24, background: fgColor, border: "2px solid #FFF", cursor: "pointer" }}
+              <div style={{ position: "absolute", left: 0, top: 0, width: 24, height: 24, background: fgColor, border: `2px solid ${t.accent}`, cursor: "pointer" }}
                 title="Couleur principale" />
             </div>
           </div>
@@ -1655,7 +1768,7 @@ export default function Editor() {
               ref={canvasRef}
               width={canvasW}
               height={canvasH}
-              style={{ ...canvasStyle, position: "relative", zIndex: 1, border: "1px solid #000" }}
+              style={{ ...canvasStyle, position: "relative", zIndex: 1, border: `1px solid ${t.border}` }}
               onMouseDown={onMouseDown}
               onMouseMove={onMouseMove}
               onMouseUp={onMouseUp}
@@ -1674,7 +1787,7 @@ export default function Editor() {
 
       {/* TEXT-TOOL CONFIG (visible only when text tool is active) */}
       {tool === "text" && (
-        <div className="amiga-panel" style={{ flexShrink: 0, borderTop: "2px solid #000", padding: "4px 8px" }}>
+        <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <div style={{ color: "#000", fontSize: 14 }}>TEXTE (TAMPON) :</div>
             <input
@@ -1685,7 +1798,7 @@ export default function Editor() {
               style={{
                 background: "#FFF",
                 color: "#000",
-                border: "2px solid #000",
+                border: `1px solid ${t.border}`,
                 padding: "2px 6px",
                 fontFamily: TEXT_FONTS[textFontIdx].family,
                 fontSize: 14,
@@ -1724,7 +1837,7 @@ export default function Editor() {
                 style={{
                   background: "#FFF",
                   color: "#000",
-                  border: "2px solid #000",
+                  border: `1px solid ${t.border}`,
                   padding: "2px 4px",
                   fontFamily: "'VT323', monospace",
                   fontSize: 14,
@@ -1755,7 +1868,7 @@ export default function Editor() {
 
       {/* SCRATCH / SCRUB PANEL — drag the slider to "scratch" the animation;
           if REC is on, this scratching is baked into the recorded video. */}
-      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: "2px solid #000", padding: "4px 8px" }}>
+      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ color: "#000", fontSize: 14, fontWeight: "bold", minWidth: 70 }}>SCRATCH :</span>
           <button
@@ -1799,7 +1912,7 @@ export default function Editor() {
       </div>
 
       {/* ANIMATION PANEL */}
-      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: "2px solid #000", padding: "4px 8px" }}>
+      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {/* Playback controls */}
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -1881,7 +1994,7 @@ export default function Editor() {
       </div>
 
       {/* PALETTE + STATUS */}
-      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `2px solid ${t.border}`, padding: "4px 8px" }}>
+      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {/* Palette */}
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -1924,9 +2037,9 @@ export default function Editor() {
           {/* FG/BG color display */}
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <div style={{ fontSize: 11, color: "#000" }}>AVANT</div>
-            <div style={{ width: 32, height: 16, background: fgColor, border: "2px solid #000" }} />
+            <div style={{ width: 32, height: 16, background: fgColor, border: `1px solid ${t.border}` }} />
             <div style={{ fontSize: 11, color: "#000" }}>FOND</div>
-            <div style={{ width: 32, height: 16, background: bgColor, border: "2px solid #000" }} />
+            <div style={{ width: 32, height: 16, background: bgColor, border: `1px solid ${t.border}` }} />
           </div>
         </div>
       </div>

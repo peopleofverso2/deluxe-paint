@@ -69,40 +69,49 @@
   }
 }
 
+/* Lighter chrome: 1px crisp outer border (instead of the original 2px
+   double-tone Amiga bevel) — keeps the pixel feel but a lot less heavy.
+   Active/pressed buttons get an inset look via swapping the two tones. */
 .amiga-panel {
   background-color: hsl(var(--panel));
   color: hsl(var(--panel-text));
-  border-top: 2px solid hsl(var(--panel-border-light));
-  border-left: 2px solid hsl(var(--panel-border-light));
-  border-right: 2px solid hsl(var(--panel-border-dark));
-  border-bottom: 2px solid hsl(var(--panel-border-dark));
+  border: 1px solid hsl(var(--panel-border-dark) / 0.6);
 }
 
 .amiga-panel-inset {
   background-color: hsl(var(--panel));
   color: hsl(var(--panel-text));
-  border-top: 2px solid hsl(var(--panel-border-dark));
-  border-left: 2px solid hsl(var(--panel-border-dark));
-  border-right: 2px solid hsl(var(--panel-border-light));
-  border-bottom: 2px solid hsl(var(--panel-border-light));
+  border: 1px solid hsl(var(--panel-border-dark) / 0.6);
 }
 
 .amiga-button {
   background-color: hsl(var(--panel));
   color: hsl(var(--panel-text));
-  border-top: 2px solid hsl(var(--panel-border-light));
-  border-left: 2px solid hsl(var(--panel-border-light));
-  border-right: 2px solid hsl(var(--panel-border-dark));
-  border-bottom: 2px solid hsl(var(--panel-border-dark));
+  border-top: 1px solid hsl(var(--panel-border-light));
+  border-left: 1px solid hsl(var(--panel-border-light));
+  border-right: 1px solid hsl(var(--panel-border-dark) / 0.7);
+  border-bottom: 1px solid hsl(var(--panel-border-dark) / 0.7);
   cursor: pointer;
+  transition: background-color 0.08s ease-out;
+}
+
+.amiga-button:hover {
+  background-color: hsl(var(--panel-border-light) / 0.6);
 }
 
 .amiga-button:active, .amiga-button[data-active="true"] {
-  border-top: 2px solid hsl(var(--panel-border-dark));
-  border-left: 2px solid hsl(var(--panel-border-dark));
-  border-right: 2px solid hsl(var(--panel-border-light));
-  border-bottom: 2px solid hsl(var(--panel-border-light));
-  background-color: hsl(var(--panel));
+  border-top: 1px solid hsl(var(--panel-border-dark) / 0.8);
+  border-left: 1px solid hsl(var(--panel-border-dark) / 0.8);
+  border-right: 1px solid hsl(var(--panel-border-light));
+  border-bottom: 1px solid hsl(var(--panel-border-light));
+  background-color: hsl(var(--primary) / 0.12);
+  color: hsl(var(--primary));
+}
+
+[data-theme="night"] .amiga-button[data-active="true"] {
+  background-color: hsl(var(--primary) / 0.18);
+  color: hsl(var(--primary));
+  border-color: hsl(var(--primary) / 0.4);
 }
 
 .pixelated {
