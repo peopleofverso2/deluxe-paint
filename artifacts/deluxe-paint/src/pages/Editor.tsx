@@ -794,6 +794,7 @@ export default function Editor() {
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const framesDataRef = useRef<(ImageData | null)[]>([null]);
   const liveDataRef = useRef<ImageData | null>(null);
   const drawingRef = useRef(false);
@@ -1535,6 +1536,48 @@ export default function Editor() {
     e.target.value = ""; // reset so re-selecting the same file re-triggers
   }
 
+  // ---- Image import ---------------------------------------------------
+  function handleImportImage() {
+    imageInputRef.current?.click();
+  }
+
+  function onImageFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const ctx = getCtx();
+      if (!ctx) return;
+      stopPlayback();
+      // Fit image inside canvas while preserving aspect ratio; letterbox
+      // the empty area with the current bgColor so the frame stays opaque.
+      const ratio = Math.min(canvasW / img.width, canvasH / img.height);
+      const drawW = Math.max(1, Math.round(img.width * ratio));
+      const drawH = Math.max(1, Math.round(img.height * ratio));
+      const dx = Math.floor((canvasW - drawW) / 2);
+      const dy = Math.floor((canvasH - drawH) / 2);
+      ctx.save();
+      // imageSmoothingEnabled mirrors the global ALIAS toggle so imports
+      // stay pixel-crisp when aliased=ON, or upscale-smooth otherwise.
+      ctx.imageSmoothingEnabled = !aliased;
+      // Background fill first (replaces previous frame)
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(0, 0, canvasW, canvasH);
+      ctx.drawImage(img, dx, dy, drawW, drawH);
+      ctx.restore();
+      saveLiveCanvas();
+      saveCurrentFrame();
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      alert("Image illisible — formats supportés : PNG, JPG, GIF, WEBP, SVG.");
+    };
+    img.src = url;
+    e.target.value = "";
+  }
+
   function handleSaveAnimGif() {
     saveCurrentFrame();
     const offscreen = document.createElement("canvas");
@@ -1608,6 +1651,7 @@ export default function Editor() {
           const animSuffix = animOk ? "" : ` — désactivé en ${canvasW}×${canvasH}`;
           return [
             { label: "NOUVEAU", action: handleNew },
+            { label: "IMPORTER IMAGE (PNG/JPG/SVG)", action: handleImportImage },
             { label: "OUVRIR PROJET (.dpaint)", action: handleOpenProject },
             { label: "SAUVER PROJET (.dpaint)", action: handleSaveProject },
             { label: "SAUVER FRAME (PNG)", action: handleSave },
@@ -1630,6 +1674,13 @@ export default function Editor() {
           accept=".dpaint,application/json"
           style={{ display: "none" }}
           onChange={onProjectFileSelected}
+        />
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display: "none" }}
+          onChange={onImageFileSelected}
         />
         <MenuDropdown label="RÉSO" items={RESOLUTIONS.map(r => ({
           label: `${r.label} ${r.w}×${r.h}${r.w === canvasW && r.h === canvasH ? " ✓" : ""}`,
