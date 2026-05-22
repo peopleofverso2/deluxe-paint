@@ -99,20 +99,28 @@
   background-color: hsl(var(--panel-border-light) / 0.6);
 }
 
-.amiga-button:active, .amiga-button[data-active="true"] {
+/* Active button: filled with the theme primary color, contrasting text.
+   :not([data-active="true"]) keeps the transient :active press state
+   visually distinct from the persistent data-active toggle state. */
+.amiga-button[data-active="true"] {
+  background-color: hsl(var(--primary)) !important;
+  color: hsl(var(--primary-foreground)) !important;
+  border: 1px solid hsl(var(--primary));
+}
+
+.amiga-button:active:not([data-active="true"]) {
   border-top: 1px solid hsl(var(--panel-border-dark) / 0.8);
   border-left: 1px solid hsl(var(--panel-border-dark) / 0.8);
   border-right: 1px solid hsl(var(--panel-border-light));
   border-bottom: 1px solid hsl(var(--panel-border-light));
-  background-color: hsl(var(--primary) / 0.12);
-  color: hsl(var(--primary));
+  background-color: hsl(var(--primary) / 0.18);
 }
 
-[data-theme="night"] .amiga-button[data-active="true"] {
-  background-color: hsl(var(--primary) / 0.18);
-  color: hsl(var(--primary));
-  border-color: hsl(var(--primary) / 0.4);
-}
+/* Inline inline-styled `color: ...` on buttons overrides the CSS color
+   declaration by default. !important above ensures the active text
+   colour wins, but inline SVG strokes also use currentColor — keep
+   them visible by inheriting the same. */
+.amiga-button[data-active="true"] svg { color: hsl(var(--primary-foreground)); }
 
 .pixelated {
   image-rendering: pixelated;
