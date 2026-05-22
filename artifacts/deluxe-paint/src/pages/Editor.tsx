@@ -499,6 +499,42 @@ function clearCanvas(ctx: CanvasRenderingContext2D, color = "#FFFFFF") {
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 }
 
+// ---- Layer model ----------------------------------------------------
+// A Layer is a "track" — it spans every frame of the project, with its
+// own offscreen canvas per frame. Drawing tools target the active layer
+// at the current frame. The displayed canvas (canvasRef) is purely a
+// composite (re-drawn after every modification).
+type Layer = {
+  id: string;
+  name: string;
+  visible: boolean;
+  opacity: number; // 0..1
+  // One offscreen canvas per frame. null = blank/transparent (lazy).
+  frames: (HTMLCanvasElement | null)[];
+};
+
+function makeLayerCanvas(w: number, h: number, fill?: string): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  if (fill) {
+    const cx = c.getContext("2d")!;
+    cx.fillStyle = fill;
+    cx.fillRect(0, 0, w, h);
+  }
+  return c;
+}
+
+function makeLayer(name: string, frameCount: number): Layer {
+  return {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    visible: true,
+    opacity: 1,
+    frames: Array.from({ length: frameCount }, () => null),
+  };
+}
+
 // Scan ImageData row by row and emit one <rect> per run of identical pixels.
 // Returns just the rects — wrap in <svg> or <g> at the call site.
 function imageDataToRects(img: ImageData): string {
@@ -837,8 +873,24 @@ export default function Editor() {
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
-  const framesDataRef = useRef<(ImageData | null)[]>([null]);
-  const liveDataRef = useRef<ImageData | null>(null);
+  // Layer model — see Layer type above. layersRef is the single source of
+  // truth for project pixels; each layer holds one offscreen canvas per
+  // frame. The displayed <canvas> is purely a composite refreshed by
+  // composite() after every modification.
+  const layersRef = useRef<Layer[]>([makeLayer("CALQUE 1", 1)]);
+  const [activeLayerIdx, setActiveLayerIdx] = useState(0);
+  const activeLayerIdxRef = useRef(0);
+  useEffect(() => { activeLayerIdxRef.current = activeLayerIdx; }, [activeLayerIdx]);
+  // Bumped whenever layer metadata or content changes so panel UI / thumbnails re-render
+  const [layerVersion, setLayerVersion] = useState(0);
+  const bumpLayers = () => setLayerVersion(v => v + 1);
+
+  // Legacy helpers kept as wrappers so the dozens of call sites still compile.
+  // - liveDataRef is no longer used (layer canvases ARE the persistent storage)
+  // - saveCurrentFrame / saveLiveCanvas become no-ops
+  // - loadFrame is just composite()
+  const liveDataRef = useRef<ImageData | null>(null); // deprecated, kept for type compat
+  void liveDataRef;
   const drawingRef = useRef(false);
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
@@ -867,14 +919,9 @@ export default function Editor() {
   useEffect(() => { playDirRef.current = playDir; }, [playDir]);
   useEffect(() => { playSpeedRef.current = playSpeed; }, [playSpeed]);
 
-  // Initialize canvas
+  // Initialize canvas — composite the empty starting frame
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d")!;
-    clearCanvas(ctx);
-    framesDataRef.current = [null];
-    saveLiveCanvas();
+    composite();
   }, []);
 
   // Apply imageSmoothingEnabled when aliased toggles (affects scaled draws / putImageData blits)
@@ -909,20 +956,154 @@ export default function Editor() {
     return () => ro.disconnect();
   }, [fit, canvasW, canvasH]);
 
-  // After every React render, restore canvas content from liveDataRef.
-  // This prevents mobile browsers from silently wiping the canvas on re-render.
-  useLayoutEffect(() => {
-    if (liveDataRef.current) {
-      const ctx = getCtx();
-      if (ctx) ctx.putImageData(liveDataRef.current, 0, 0);
-    }
-  });
+  // Layer helpers ----------------------------------------------------
 
-  function getCtx() {
+  // Return the displayed <canvas>'s 2D context (read-only for our model:
+  // we never draw onto it directly, composite() rebuilds it from layers).
+  function getDisplayCtx() {
     return canvasRef.current?.getContext("2d") ?? null;
   }
+
+  // Get (and lazily allocate) the active layer's offscreen canvas at the
+  // current frame. Drawing tools always target this.
+  function getActiveCanvas(): HTMLCanvasElement | null {
+    const layer = layersRef.current[activeLayerIdxRef.current];
+    if (!layer) return null;
+    const f = currentFrameRef.current;
+    let c = layer.frames[f];
+    if (!c) {
+      c = makeLayerCanvas(canvasW, canvasH);
+      layer.frames[f] = c;
+    } else if (c.width !== canvasW || c.height !== canvasH) {
+      // Resolution changed since this canvas was created — allocate fresh
+      const fresh = makeLayerCanvas(canvasW, canvasH);
+      const fctx = fresh.getContext("2d")!;
+      fctx.imageSmoothingEnabled = false;
+      fctx.drawImage(c, 0, 0, fresh.width, fresh.height);
+      c = fresh;
+      layer.frames[f] = c;
+    }
+    return c;
+  }
+
+  // The main tool entry point — kept named getCtx so existing draw sites
+  // don't have to change. Returns the ACTIVE LAYER's context.
+  function getCtx() {
+    return getActiveCanvas()?.getContext("2d") ?? null;
+  }
+
   function getOverlayCtx() {
     return overlayRef.current?.getContext("2d") ?? null;
+  }
+
+  // Composite all visible layers (in order) at the current frame onto the
+  // displayed canvas. White background fill so frame transparency reads
+  // as "the project's paper", consistent with the original Amiga look.
+  function composite() {
+    const dctx = getDisplayCtx();
+    if (!dctx) return;
+    dctx.save();
+    dctx.imageSmoothingEnabled = false;
+    dctx.fillStyle = "#FFFFFF";
+    dctx.fillRect(0, 0, canvasW, canvasH);
+    const f = currentFrameRef.current;
+    for (const layer of layersRef.current) {
+      if (!layer.visible) continue;
+      const c = layer.frames[f];
+      if (!c) continue;
+      dctx.globalAlpha = layer.opacity;
+      dctx.drawImage(c, 0, 0);
+    }
+    dctx.restore();
+  }
+
+  // After every React render, recomposite — mobile browsers wipe the
+  // displayed canvas when its width/height attributes change, and the
+  // layer offscreens (which AREN'T in the DOM) keep their pixels.
+  useLayoutEffect(() => {
+    composite();
+  });
+
+  // Composite an arbitrary frame index to a fresh offscreen canvas
+  // (used by exports / thumbnails — anything outside the live display).
+  function compositeFrameToCanvas(idx: number): HTMLCanvasElement {
+    const off = document.createElement("canvas");
+    off.width = canvasW;
+    off.height = canvasH;
+    const cx = off.getContext("2d")!;
+    cx.imageSmoothingEnabled = false;
+    cx.fillStyle = "#FFFFFF";
+    cx.fillRect(0, 0, canvasW, canvasH);
+    for (const layer of layersRef.current) {
+      if (!layer.visible) continue;
+      const c = layer.frames[idx];
+      if (!c) continue;
+      cx.globalAlpha = layer.opacity;
+      cx.drawImage(c, 0, 0);
+    }
+    return off;
+  }
+  function compositeFrameToImageData(idx: number): ImageData {
+    const c = compositeFrameToCanvas(idx);
+    return c.getContext("2d")!.getImageData(0, 0, c.width, c.height);
+  }
+  // Project-wide frame count is derived from the first layer's frames.
+  function frameCountOf() { return layersRef.current[0]?.frames.length ?? 1; }
+  // Returns true if any layer has any non-null frame (used to decide
+  // whether to show "rescale frames" confirms etc.).
+  function hasAnyContent() {
+    return layersRef.current.some(l => l.frames.some(f => f !== null));
+  }
+
+  // ---- Layer mutations -----------------------------------------------
+  function addNewLayer() {
+    const layers = layersRef.current;
+    const newName = `CALQUE ${layers.length + 1}`;
+    const fc = frameCountOf();
+    layers.splice(activeLayerIdxRef.current + 1, 0, makeLayer(newName, fc));
+    setActiveLayerIdx(activeLayerIdxRef.current + 1);
+    activeLayerIdxRef.current = activeLayerIdxRef.current + 1;
+    bumpLayers();
+    composite();
+  }
+  function deleteLayer(idx: number) {
+    const layers = layersRef.current;
+    if (layers.length <= 1) return;
+    layers.splice(idx, 1);
+    const newActive = Math.min(activeLayerIdxRef.current, layers.length - 1);
+    setActiveLayerIdx(newActive);
+    activeLayerIdxRef.current = newActive;
+    bumpLayers();
+    composite();
+  }
+  function selectLayer(idx: number) {
+    setActiveLayerIdx(idx);
+    activeLayerIdxRef.current = idx;
+    // Undo history is captured per active layer's pixels; switching the
+    // active layer would let an undo restore the wrong layer. Reset.
+    historyRef.current.clear();
+    setHistoryTick(k => k + 1);
+    bumpLayers();
+  }
+  function toggleLayerVisible(idx: number) {
+    const l = layersRef.current[idx];
+    if (!l) return;
+    l.visible = !l.visible;
+    bumpLayers();
+    composite();
+  }
+  function setLayerOpacity(idx: number, opacity: number) {
+    const l = layersRef.current[idx];
+    if (!l) return;
+    l.opacity = Math.max(0, Math.min(1, opacity));
+    bumpLayers();
+    composite();
+  }
+  function renameLayer(idx: number, name: string) {
+    const l = layersRef.current[idx];
+    if (!l) return;
+    l.name = name.trim().slice(0, 24) || `CALQUE ${idx + 1}`;
+    bumpLayers();
   }
 
   function getCanvasCoords(e: React.MouseEvent): { x: number; y: number } {
@@ -943,32 +1124,14 @@ export default function Editor() {
     };
   }
 
-  // Save current canvas into framesData
-  function saveCurrentFrame() {
-    const ctx = getCtx();
-    if (!ctx) return;
-    framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
-  }
-
-  // Snapshot canvas → liveDataRef (protects against mobile re-render wipes)
-  function saveLiveCanvas() {
-    const ctx = getCtx();
-    if (!ctx) return;
-    liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
-  }
-
-  // Load a frame onto canvas
-  function loadFrame(idx: number) {
-    const ctx = getCtx();
-    if (!ctx) return;
-    const data = framesDataRef.current[idx];
-    if (data) {
-      ctx.putImageData(data, 0, 0);
-    } else {
-      clearCanvas(ctx);
-    }
-    saveLiveCanvas();
-  }
+  // Layer-aware shims for the old per-frame functions. saveCurrentFrame
+  // is a no-op (layer canvases ARE the storage). saveLiveCanvas was
+  // called at every drawing site to snapshot the canvas; now it just
+  // triggers a recomposite so the displayed canvas reflects the latest
+  // change to the active layer. loadFrame just composites the new frame.
+  function saveCurrentFrame() { /* no-op */ }
+  function saveLiveCanvas()   { composite(); }
+  function loadFrame(_idx: number) { composite(); }
 
   function switchToFrame(idx: number) {
     saveCurrentFrame();
@@ -1114,46 +1277,59 @@ export default function Editor() {
   // Add blank frame
   function addFrame() {
     stopPlayback();
-    saveCurrentFrame();
     const newIdx = currentFrameRef.current + 1;
-    // Insert null at newIdx
-    framesDataRef.current.splice(newIdx, 0, null);
-    const newCount = framesDataRef.current.length;
+    // Insert a fresh empty slot in every layer
+    for (const layer of layersRef.current) layer.frames.splice(newIdx, 0, null);
+    const newCount = frameCountOf();
     frameCountRef.current = newCount;
     setFrameCount(newCount);
     switchToFrame(newIdx);
+    bumpLayers();
   }
 
-  // Duplicate current frame
+  // Duplicate current frame — clone every layer's current-frame canvas
   function duplicateFrame() {
     stopPlayback();
-    saveCurrentFrame();
-    const src = framesDataRef.current[currentFrameRef.current];
-    const newIdx = currentFrameRef.current + 1;
-    framesDataRef.current.splice(newIdx, 0, src ? new ImageData(new Uint8ClampedArray(src.data), src.width, src.height) : null);
-    const newCount = framesDataRef.current.length;
+    const idx = currentFrameRef.current;
+    const newIdx = idx + 1;
+    for (const layer of layersRef.current) {
+      const src = layer.frames[idx];
+      if (src) {
+        const dup = makeLayerCanvas(canvasW, canvasH);
+        const dctx = dup.getContext("2d")!;
+        dctx.imageSmoothingEnabled = false;
+        dctx.drawImage(src, 0, 0);
+        layer.frames.splice(newIdx, 0, dup);
+      } else {
+        layer.frames.splice(newIdx, 0, null);
+      }
+    }
+    const newCount = frameCountOf();
     frameCountRef.current = newCount;
     setFrameCount(newCount);
     switchToFrame(newIdx);
+    bumpLayers();
   }
 
-  // Delete current frame
+  // Delete current frame — drop the slot from every layer
   function deleteFrame() {
     if (frameCountRef.current <= 1) {
-      const ctx = getCtx();
-      if (ctx) clearCanvas(ctx);
-      framesDataRef.current = [null];
+      // Last frame: clear every layer's only slot instead of removing
+      for (const layer of layersRef.current) layer.frames[0] = null;
+      composite();
+      bumpLayers();
       return;
     }
     stopPlayback();
-    framesDataRef.current.splice(currentFrameRef.current, 1);
-    const newCount = framesDataRef.current.length;
+    for (const layer of layersRef.current) layer.frames.splice(currentFrameRef.current, 1);
+    const newCount = frameCountOf();
     frameCountRef.current = newCount;
     setFrameCount(newCount);
     const newIdx = Math.min(currentFrameRef.current, newCount - 1);
     currentFrameRef.current = newIdx;
     setCurrentFrame(newIdx);
-    loadFrame(newIdx);
+    composite();
+    bumpLayers();
   }
 
   // Drawing handlers
@@ -1601,11 +1777,11 @@ export default function Editor() {
         const c = t === "eraser" ? bgColorRef.current : color;
         const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
         stampBrush(ctx, pos.x, pos.y, brushSizeRef.current, c, shape, lastAngleRef.current);
-        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+        composite();
       } else if (t === "fill") {
         pushUndo();
         floodFill(ctx, pos.x, pos.y, color);
-        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+        composite();
         drawingRef.current = false;
       } else if (t === "eyedropper") {
         const pixel = ctx.getImageData(pos.x, pos.y, 1, 1).data;
@@ -1617,7 +1793,7 @@ export default function Editor() {
           pushUndo();
           const font = TEXT_FONTS[textFontIdxRef.current];
           stampText(ctx, pos.x, pos.y, color, txt, font.family, textSizeRef.current, aliasedRef.current, !!font.pixel);
-          liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+          composite();
         }
         drawingRef.current = false;
       } else if (t === "select") {
@@ -1663,7 +1839,7 @@ export default function Editor() {
         const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
         lastAngleRef.current = stampLine(ctx, last.x, last.y, pos.x, pos.y, sz, c, shape, lastAngleRef.current);
         lastPosRef.current = pos;
-        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+        composite();
       } else if (t === "line" && overlay && startPosRef.current) {
         overlay.clearRect(0, 0, canvasW, canvasH);
         drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, al);
@@ -1697,15 +1873,15 @@ export default function Editor() {
       if (t === "line") {
         pushUndo();
         drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, al);
-        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+        composite();
       } else if (t === "rect" || t === "rect-fill") {
         pushUndo();
         drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill", al);
-        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+        composite();
       } else if (t === "ellipse" || t === "ellipse-fill") {
         pushUndo();
         drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill", al);
-        liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
+        composite();
       }
       if (overlay) overlay.clearRect(0, 0, canvasW, canvasH);
       startPosRef.current = null;
@@ -1737,14 +1913,16 @@ export default function Editor() {
   function handleNew() {
     stopPlayback();
     if (!confirm("Effacer tout et recommencer ?")) return;
-    framesDataRef.current = [null];
+    layersRef.current = [makeLayer("CALQUE 1", 1)];
+    setActiveLayerIdx(0);
+    activeLayerIdxRef.current = 0;
     frameCountRef.current = 1;
     setFrameCount(1);
     currentFrameRef.current = 0;
     setCurrentFrame(0);
     clearHistory();
-    const ctx = getCtx();
-    if (ctx) { clearCanvas(ctx); saveLiveCanvas(); }
+    bumpLayers();
+    composite();
   }
 
   // -------------------- Selection actions --------------------
@@ -1823,40 +2001,34 @@ export default function Editor() {
     if (b.w < 1 || b.h < 1) return;
     stopPlayback();
     clearHistory();
-    const ctx = getCtx();
-    if (ctx) framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
-    const tmp = document.createElement("canvas");
-    tmp.width = canvasW;
-    tmp.height = canvasH;
-    const tctx = tmp.getContext("2d")!;
-    framesDataRef.current = framesDataRef.current.map(img => {
-      if (!img) return null;
-      tctx.putImageData(img, 0, 0);
-      const out = document.createElement("canvas");
-      out.width = b.w;
-      out.height = b.h;
-      const octx = out.getContext("2d")!;
-      if (sel.kind === "lasso") {
-        // Translate the polygon into the cropped canvas's local space
-        const local = new Path2D();
-        local.moveTo(sel.points[0].x - b.x, sel.points[0].y - b.y);
-        for (let i = 1; i < sel.points.length; i++) local.lineTo(sel.points[i].x - b.x, sel.points[i].y - b.y);
-        local.closePath();
-        octx.save();
-        octx.clip(local);
-        octx.drawImage(tmp, -b.x, -b.y);
-        octx.restore();
-      } else {
-        octx.drawImage(tmp, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
-      }
-      return octx.getImageData(0, 0, b.w, b.h);
-    });
-    liveDataRef.current = framesDataRef.current[currentFrameRef.current] ?? null;
+    // Crop every layer's every frame canvas to the selection bbox
+    for (const layer of layersRef.current) {
+      layer.frames = layer.frames.map(c => {
+        if (!c) return null;
+        const out = makeLayerCanvas(b.w, b.h);
+        const octx = out.getContext("2d")!;
+        octx.imageSmoothingEnabled = false;
+        if (sel.kind === "lasso") {
+          const local = new Path2D();
+          local.moveTo(sel.points[0].x - b.x, sel.points[0].y - b.y);
+          for (let i = 1; i < sel.points.length; i++) local.lineTo(sel.points[i].x - b.x, sel.points[i].y - b.y);
+          local.closePath();
+          octx.save();
+          octx.clip(local);
+          octx.drawImage(c, -b.x, -b.y);
+          octx.restore();
+        } else {
+          octx.drawImage(c, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+        }
+        return out;
+      });
+    }
     setCanvasW(b.w);
     setCanvasH(b.h);
     canvasWRef.current = b.w;
     canvasHRef.current = b.h;
     setSelection(null);
+    bumpLayers();
   }
 
   // Snapshot the selected pixels into the clipboard. Lasso uses Path2D
@@ -2108,81 +2280,71 @@ export default function Editor() {
     if (newW === canvasW && newH === canvasH) return;
     stopPlayback();
     clearHistory();
-    // Persist any unsaved live edits before rescaling
-    const ctx = getCtx();
-    if (ctx) framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
-    framesDataRef.current = framesDataRef.current.map(img => img ? rescaleImageData(img, newW, newH) : null);
-    liveDataRef.current = framesDataRef.current[currentFrameRef.current] ?? null;
+    // Rescale every layer's every frame canvas via nearest-neighbor
+    for (const layer of layersRef.current) {
+      layer.frames = layer.frames.map(c => {
+        if (!c) return null;
+        const out = makeLayerCanvas(newW, newH);
+        const octx = out.getContext("2d")!;
+        octx.imageSmoothingEnabled = false;
+        octx.drawImage(c, 0, 0, newW, newH);
+        return out;
+      });
+    }
     setCanvasW(newW);
     setCanvasH(newH);
     canvasWRef.current = newW;
     canvasHRef.current = newH;
+    bumpLayers();
   }
 
   function handleSaveGif() {
     // Save all frames as individual PNGs in a zip-like sequence
-    saveCurrentFrame();
-    framesDataRef.current.forEach((imgData, i) => {
-      const offscreen = document.createElement("canvas");
-      offscreen.width = canvasW;
-      offscreen.height = canvasH;
-      const ctx2 = offscreen.getContext("2d")!;
-      if (imgData) {
-        ctx2.putImageData(imgData, 0, 0);
-      } else {
-        clearCanvas(ctx2);
-      }
+    const n = frameCountOf();
+    for (let i = 0; i < n; i++) {
+      const off = compositeFrameToCanvas(i);
       const a = document.createElement("a");
-      a.href = offscreen.toDataURL("image/png");
+      a.href = off.toDataURL("image/png");
       a.download = `animation-frame-${String(i + 1).padStart(3, "0")}.png`;
       a.click();
-    });
+    }
   }
 
   function handleSaveSvg() {
-    saveCurrentFrame();
-    const ctx = getCtx();
-    if (!ctx) return;
-    const img = ctx.getImageData(0, 0, canvasW, canvasH);
+    const img = compositeFrameToImageData(currentFrameRef.current);
     const svg = imageDataToSvg(img);
     downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `frame-${currentFrame + 1}.svg`);
   }
 
   function handleSaveAllSvg() {
-    saveCurrentFrame();
-    const offscreen = document.createElement("canvas");
-    offscreen.width = canvasW;
-    offscreen.height = canvasH;
-    const ctx2 = offscreen.getContext("2d")!;
-    framesDataRef.current.forEach((imgData, i) => {
-      if (imgData) ctx2.putImageData(imgData, 0, 0);
-      else clearCanvas(ctx2);
-      const frameImg = ctx2.getImageData(0, 0, canvasW, canvasH);
-      const svg = imageDataToSvg(frameImg);
+    const n = frameCountOf();
+    for (let i = 0; i < n; i++) {
+      const img = compositeFrameToImageData(i);
+      const svg = imageDataToSvg(img);
       downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `animation-frame-${String(i + 1).padStart(3, "0")}.svg`);
-    });
+    }
   }
 
   function handleSaveProject() {
-    saveCurrentFrame();
-    const offscreen = document.createElement("canvas");
-    offscreen.width = canvasW;
-    offscreen.height = canvasH;
-    const ctx2 = offscreen.getContext("2d")!;
-    const frames = framesDataRef.current.map(imgData => {
-      if (!imgData) return null; // empty/blank frame stays null
-      ctx2.putImageData(imgData, 0, 0);
-      return offscreen.toDataURL("image/png");
-    });
+    // version 2: layers as tracks. Each layer carries meta + an array of
+    // dataURLs (or nulls) for its per-frame canvases.
+    const layers = layersRef.current.map(layer => ({
+      id: layer.id,
+      name: layer.name,
+      visible: layer.visible,
+      opacity: layer.opacity,
+      frames: layer.frames.map(c => c ? c.toDataURL("image/png") : null),
+    }));
     const data = {
       format: "dpaint-project",
-      version: 1,
+      version: 2,
       width: canvasW,
       height: canvasH,
       fps,
       looping,
       currentFrame,
-      frames,
+      activeLayerIdx,
+      layers,
     };
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     downloadBlob(new Blob([JSON.stringify(data)], { type: "application/json" }), `dpaint-project-${ts}.dpaint`);
@@ -2199,52 +2361,81 @@ export default function Editor() {
       const text = await file.text();
       const data = JSON.parse(text);
       if (data?.format !== "dpaint-project") throw new Error("Format inconnu (attendu : dpaint-project)");
-      if (!Array.isArray(data.frames)) throw new Error("Pas de frames dans le projet");
-      // Adopt the project's resolution if it differs (defaults to current dims).
       const targetW = typeof data.width === "number" && data.width > 0 ? data.width : canvasW;
       const targetH = typeof data.height === "number" && data.height > 0 ? data.height : canvasH;
       stopPlayback();
-      const loaded: (ImageData | null)[] = await Promise.all(
-        (data.frames as (string | null)[]).map(url => {
-          if (!url) return Promise.resolve<ImageData | null>(null);
-          return new Promise<ImageData | null>((resolve, reject) => {
-            const img = new Image();
-            img.onload = () => {
-              const c = document.createElement("canvas");
-              c.width = targetW;
-              c.height = targetH;
-              const ctx = c.getContext("2d")!;
-              ctx.drawImage(img, 0, 0);
-              resolve(ctx.getImageData(0, 0, targetW, targetH));
-            };
-            img.onerror = () => reject(new Error("Frame illisible"));
-            img.src = url;
-          });
-        })
-      );
-      // Apply the loaded resolution before assigning frame data so the
-      // canvas element gets the new width/height attrs on the next render.
+
+      // Helper: load a dataURL into a fresh layer-sized canvas
+      const loadCanvas = (url: string | null): Promise<HTMLCanvasElement | null> => {
+        if (!url) return Promise.resolve(null);
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = makeLayerCanvas(targetW, targetH);
+            const cx = c.getContext("2d")!;
+            cx.imageSmoothingEnabled = false;
+            cx.drawImage(img, 0, 0);
+            resolve(c);
+          };
+          img.onerror = () => reject(new Error("Frame illisible"));
+          img.src = url;
+        });
+      };
+
+      let newLayers: Layer[];
+      // version 2: layers as tracks
+      if (Array.isArray(data.layers)) {
+        newLayers = await Promise.all(
+          (data.layers as Array<{ id?: string; name?: string; visible?: boolean; opacity?: number; frames: (string | null)[] }>).map(async (l, i) => {
+            const frames = await Promise.all((l.frames ?? []).map(loadCanvas));
+            return {
+              id: l.id ?? `${Date.now().toString(36)}-${i}`,
+              name: l.name ?? `CALQUE ${i + 1}`,
+              visible: typeof l.visible === "boolean" ? l.visible : true,
+              opacity: typeof l.opacity === "number" ? l.opacity : 1,
+              frames,
+            } as Layer;
+          })
+        );
+      // version 1: flat frames array → wrap as a single layer
+      } else if (Array.isArray(data.frames)) {
+        const frames = await Promise.all((data.frames as (string | null)[]).map(loadCanvas));
+        newLayers = [{
+          id: `${Date.now().toString(36)}-1`,
+          name: "CALQUE 1",
+          visible: true,
+          opacity: 1,
+          frames,
+        }];
+      } else {
+        throw new Error("Aucun calque ni frame dans le projet");
+      }
+
       if (targetW !== canvasW || targetH !== canvasH) {
         setCanvasW(targetW);
         setCanvasH(targetH);
         canvasWRef.current = targetW;
         canvasHRef.current = targetH;
       }
-      framesDataRef.current = loaded.length ? loaded : [null];
-      const n = framesDataRef.current.length;
+      layersRef.current = newLayers.length ? newLayers : [makeLayer("CALQUE 1", 1)];
+      const n = frameCountOf();
       frameCountRef.current = n;
       setFrameCount(n);
       clearHistory();
       if (typeof data.fps === "number") setFps(data.fps);
       if (typeof data.looping === "boolean") { setLooping(data.looping); loopingRef.current = data.looping; }
-      const start = typeof data.currentFrame === "number" ? Math.min(Math.max(0, data.currentFrame), n - 1) : 0;
-      currentFrameRef.current = start;
-      setCurrentFrame(start);
-      loadFrame(start);
+      const startFrame = typeof data.currentFrame === "number" ? Math.min(Math.max(0, data.currentFrame), n - 1) : 0;
+      currentFrameRef.current = startFrame;
+      setCurrentFrame(startFrame);
+      const startLayer = typeof data.activeLayerIdx === "number" ? Math.min(Math.max(0, data.activeLayerIdx), layersRef.current.length - 1) : 0;
+      setActiveLayerIdx(startLayer);
+      activeLayerIdxRef.current = startLayer;
+      bumpLayers();
+      composite();
     } catch (err) {
       alert("Impossible de charger le projet : " + (err instanceof Error ? err.message : String(err)));
     }
-    e.target.value = ""; // reset so re-selecting the same file re-triggers
+    e.target.value = "";
   }
 
   // ---- Image import ---------------------------------------------------
@@ -2291,22 +2482,15 @@ export default function Editor() {
   }
 
   function handleSaveAnimGif() {
-    saveCurrentFrame();
-    const offscreen = document.createElement("canvas");
-    offscreen.width = canvasW;
-    offscreen.height = canvasH;
-    const ctx2 = offscreen.getContext("2d")!;
     const gif = GIFEncoder();
     const delay = Math.max(20, Math.round(1000 / Math.max(fps, 1))); // ms per frame; min 20ms (50fps cap)
-    framesDataRef.current.forEach(imgData => {
-      if (imgData) ctx2.putImageData(imgData, 0, 0);
-      else clearCanvas(ctx2);
-      const frameImg = ctx2.getImageData(0, 0, canvasW, canvasH);
-      // Median-cut quantize to ≤256 palette colors per frame, then map pixels.
+    const n = frameCountOf();
+    for (let i = 0; i < n; i++) {
+      const frameImg = compositeFrameToImageData(i);
       const palette = quantize(frameImg.data, 256);
       const index = applyPalette(frameImg.data, palette);
       gif.writeFrame(index, canvasW, canvasH, { palette, delay });
-    });
+    }
     gif.finish();
     const bytes = gif.bytes();
     // Loop count: 0 = infinite, 1 = play once. GIFEncoder sets infinite by
@@ -2325,18 +2509,9 @@ export default function Editor() {
   }
 
   function handleSaveAnimSvg() {
-    saveCurrentFrame();
-    // Rasterize every frame against a temp canvas so empty frames become
-    // a real blank ImageData and the SVG output is consistent.
-    const offscreen = document.createElement("canvas");
-    offscreen.width = canvasW;
-    offscreen.height = canvasH;
-    const ctx2 = offscreen.getContext("2d")!;
-    const baked: ImageData[] = framesDataRef.current.map(imgData => {
-      if (imgData) ctx2.putImageData(imgData, 0, 0);
-      else clearCanvas(ctx2);
-      return ctx2.getImageData(0, 0, canvasW, canvasH);
-    });
+    // Composite each frame's visible layers into a single ImageData
+    const n = frameCountOf();
+    const baked: ImageData[] = Array.from({ length: n }, (_, i) => compositeFrameToImageData(i));
     const svg = framesToAnimatedSvg(baked, canvasW, canvasH, fps, looping);
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `dpaint-anim-${ts}.svg`);
@@ -2425,7 +2600,7 @@ export default function Editor() {
           label: `${r.label} ${r.w}×${r.h}${r.w === canvasW && r.h === canvasH ? " ✓" : ""}`,
           action: () => {
             if (r.w === canvasW && r.h === canvasH) return;
-            if (framesDataRef.current.some(f => f) && !confirm(`Passer en ${r.label} (${r.w}×${r.h}) ? Toutes les frames seront rescalées au plus proche voisin.`)) return;
+            if (hasAnyContent() && !confirm(`Passer en ${r.label} (${r.w}×${r.h}) ? Toutes les frames seront rescalées au plus proche voisin.`)) return;
             switchResolution(r.w, r.h);
           },
         }))} />
@@ -2827,6 +3002,64 @@ export default function Editor() {
         </div>
       </div>
 
+      {/* LAYER PANEL — calques (pistes) */}
+      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ color: t.panelText, fontSize: 14, fontWeight: "bold" }}>CALQUES :</span>
+          <button className="amiga-button" onClick={addNewLayer} title="Nouveau calque au-dessus de l'actif" style={{ padding: "2px 8px" }}>+ CALQUE</button>
+          <div style={{ display: "flex", gap: 4, overflowX: "auto", flex: 1, alignItems: "center" }} key={`layers-${layerVersion}`}>
+            {layersRef.current.map((layer, i) => {
+              const isActive = i === activeLayerIdx;
+              return (
+                <div
+                  key={layer.id}
+                  onClick={() => selectLayer(i)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "2px 6px",
+                    cursor: "pointer",
+                    background: isActive ? `${t.accent}22` : "transparent",
+                    border: `1px solid ${isActive ? t.accent : t.border}`,
+                    color: t.panelText,
+                    fontSize: 12,
+                    minWidth: 100,
+                  }}
+                  title={isActive ? "Calque actif" : "Cliquer pour activer"}
+                >
+                  <button
+                    onClick={e => { e.stopPropagation(); toggleLayerVisible(i); }}
+                    title={layer.visible ? "Masquer" : "Afficher"}
+                    style={{ background: "transparent", border: "none", cursor: "pointer", color: t.panelText, fontSize: 14, padding: "0 2px", opacity: layer.visible ? 1 : 0.35 }}
+                  >
+                    {layer.visible ? "👁" : "·"}
+                  </button>
+                  <span style={{ fontWeight: isActive ? "bold" : "normal", flex: 1 }}>{layer.name}</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(layer.opacity * 100)}
+                    onClick={e => e.stopPropagation()}
+                    onChange={e => setLayerOpacity(i, Number(e.target.value) / 100)}
+                    title={`Opacité ${Math.round(layer.opacity * 100)}%`}
+                    style={{ width: 50, accentColor: t.accent }}
+                  />
+                  {layersRef.current.length > 1 && (
+                    <button
+                      onClick={e => { e.stopPropagation(); if (confirm(`Supprimer "${layer.name}" ?`)) deleteLayer(i); }}
+                      title="Supprimer le calque"
+                      style={{ background: "transparent", border: "none", cursor: "pointer", color: "#AA0000", fontSize: 14, padding: "0 2px" }}
+                    >×</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
       {/* ANIMATION PANEL */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2898,10 +3131,10 @@ export default function Editor() {
           <div style={{ display: "flex", gap: 2, overflowX: "auto", flex: 1, alignItems: "center" }}>
             {Array.from({ length: frameCount }, (_, i) => (
               <FrameThumb
-                key={i}
+                key={`${i}-${layerVersion}`}
                 index={i}
                 current={currentFrame === i}
-                frameData={framesDataRef.current[i]}
+                frameData={compositeFrameToImageData(i)}
                 onClick={() => !playing && switchToFrame(i)}
               />
             ))}
