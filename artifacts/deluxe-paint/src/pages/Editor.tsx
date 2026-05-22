@@ -1155,7 +1155,7 @@ export default function Editor() {
     bumpLayers();
   }
 
-  function getCanvasCoords(e: React.MouseEvent): { x: number; y: number } {
+  function getCanvasCoords(e: { clientX: number; clientY: number }): { x: number; y: number } {
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
     return {
@@ -1179,13 +1179,24 @@ export default function Editor() {
   // triggers a recomposite so the displayed canvas reflects the latest
   // change to the active layer. loadFrame just composites the new frame.
   function saveCurrentFrame() { /* no-op */ }
+  // RAF-throttled composite: multiple drawing events within one animation
+  // frame collapse into a single display refresh. Crucial at 4K, where
+  // each composite() reads/writes ~33 MB of pixels.
+  const compositeRafRef = useRef<number | null>(null);
+  function scheduleComposite() {
+    if (compositeRafRef.current != null) return;
+    compositeRafRef.current = requestAnimationFrame(() => {
+      compositeRafRef.current = null;
+      composite();
+    });
+  }
   function saveLiveCanvas() {
-    composite();
+    scheduleComposite();
     // Invalidate the thumbnail cache for the frame we just modified so
     // the next render (or the next playback start) recomputes it.
     thumbCacheRef.current.delete(currentFrameRef.current);
   }
-  function loadFrame(_idx: number) { composite(); }
+  function loadFrame(_idx: number) { composite(); /* immediate — frame switch should be visible right away */ }
 
   function switchToFrame(idx: number) {
     saveCurrentFrame();
@@ -1403,7 +1414,11 @@ export default function Editor() {
   }
 
   // Drawing handlers
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
+  const onMouseDown = useCallback((e: React.PointerEvent) => {
+    // Pointer events fire for touch too — skip those so the dedicated
+    // touch handler (with multi-touch logic + passive:false) keeps owning
+    // them. Mouse + pen flow through here.
+    if (e.pointerType === "touch") return;
     e.preventDefault();
     const isRight = e.button === 2;
     const color = isRight ? bgColor : fgColor;
@@ -1488,7 +1503,8 @@ export default function Editor() {
     }
   }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased, textInput, textFontIdx, textSize, selectMode]);
 
-  const onMouseMove = useCallback((e: React.MouseEvent) => {
+  const onMouseMove = useCallback((e: React.PointerEvent) => {
+    if (e.pointerType === "touch") return;
     const pos = getCanvasCoords(e);
     setMousePos(pos);
     if (!drawingRef.current) return;
@@ -1511,11 +1527,21 @@ export default function Editor() {
     if (!ctx) return;
 
     if (tool === "pencil" || tool === "eraser") {
-      const last = lastPosRef.current ?? pos;
+      // High-frequency input: use getCoalescedEvents() to recover the
+      // sub-frame positions the browser merged into this one synthetic
+      // event. Fast strokes then trace ALL the intermediate points
+      // instead of jumping in straight segments between sparse samples.
+      const native = e.nativeEvent as PointerEvent;
+      const coalesced = typeof native.getCoalescedEvents === "function" ? native.getCoalescedEvents() : [];
+      const positions = coalesced.length > 0 ? coalesced.map(getCanvasCoords) : [pos];
       const c = tool === "eraser" ? bgColor : color;
       const shape: BrushShape = tool === "eraser" ? "square" : brushShape;
-      lastAngleRef.current = stampLine(ctx, last.x, last.y, pos.x, pos.y, brushSize, c, shape, lastAngleRef.current);
-      lastPosRef.current = pos;
+      let prev = lastPosRef.current ?? positions[0];
+      for (const p of positions) {
+        lastAngleRef.current = stampLine(ctx, prev.x, prev.y, p.x, p.y, brushSize, c, shape, lastAngleRef.current);
+        prev = p;
+      }
+      lastPosRef.current = prev;
       saveLiveCanvas();
     } else if (tool === "stamp") {
       const cb = clipboardRef.current;
@@ -1572,7 +1598,8 @@ export default function Editor() {
     }
   }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased, selectMode]);
 
-  const onMouseUp = useCallback((e: React.MouseEvent) => {
+  const onMouseUp = useCallback((e: React.PointerEvent) => {
+    if (e.pointerType === "touch") return;
     if (!drawingRef.current) return;
     drawingRef.current = false;
     const pos = getCanvasCoords(e);
@@ -2886,10 +2913,11 @@ export default function Editor() {
               width={canvasW}
               height={canvasH}
               style={{ ...canvasStyle, position: "relative", zIndex: 1, border: `1px solid ${t.border}` }}
-              onMouseDown={onMouseDown}
-              onMouseMove={onMouseMove}
-              onMouseUp={onMouseUp}
-              onMouseLeave={onMouseLeave}
+              onPointerDown={onMouseDown}
+              onPointerMove={onMouseMove}
+              onPointerUp={onMouseUp}
+              onPointerLeave={onMouseLeave}
+              onPointerCancel={onMouseUp}
               onContextMenu={e => e.preventDefault()}
             />
             <canvas
