@@ -786,13 +786,24 @@ export default function Editor() {
   const [textFontIdx, setTextFontIdx] = useState(0);
   const [textSize, setTextSize] = useState(16);
 
-  // Selection state — a rectangle in canvas coords (or null when nothing
-  // is selected). The selection is drawn onto the overlay canvas as a
-  // dashed marquee that's animated by a tick interval to mimic the
-  // classic "marching ants" effect.
-  const [selection, setSelection] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  const selectionRef = useRef<typeof selection>(null);
+  // Selection state. A selection is either a rectangle or a polygon
+  // (lasso); both carry their bounding box for clipboard / crop ops.
+  type Selection =
+    | { kind: "rect";  x: number; y: number; w: number; h: number }
+    | { kind: "lasso"; points: { x: number; y: number }[]; bbox: { x: number; y: number; w: number; h: number } };
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const selectionRef = useRef<Selection | null>(null);
   const antsOffsetRef = useRef(0);
+  // Mode toggle for the SÉLECTION tool
+  const [selectMode, setSelectMode] = useState<"rect" | "lasso">("rect");
+  const selectModeRef = useRef(selectMode);
+  // In-progress lasso path while dragging
+  const lassoPointsRef = useRef<{ x: number; y: number }[]>([]);
+  // Clipboard for copy/paste. Stored as an offscreen canvas so masked
+  // (lasso) copies keep their alpha; .x/.y remember the original position
+  // so PASTE can drop it back in place.
+  const clipboardRef = useRef<{ canvas: HTMLCanvasElement; x: number; y: number } | null>(null);
+  const [clipboardKey, setClipboardKey] = useState(0); // bumps to re-render the COLLER button enabled state
 
   // Animation state
   const [frameCount, setFrameCount] = useState(1);
@@ -1164,11 +1175,15 @@ export default function Editor() {
       }
       drawingRef.current = false;
     } else if (tool === "select") {
-      // Start defining a new selection rect — keep drawingRef true so move
-      // events extend it; mouseUp commits it to state.
+      // Start defining a new selection — keep drawingRef true so move
+      // events extend it; mouseUp commits to state. For lasso, seed the
+      // points list with the down position.
       setSelection(null);
+      if (selectMode === "lasso") {
+        lassoPointsRef.current = [{ x: pos.x, y: pos.y }];
+      }
     }
-  }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased, textInput, textFontIdx, textSize]);
+  }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased, textInput, textFontIdx, textSize, selectMode]);
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
     const pos = getCanvasCoords(e);
@@ -1198,21 +1213,39 @@ export default function Editor() {
       drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
     } else if (tool === "select" && overlay && startPosRef.current) {
       overlay.clearRect(0, 0, canvasW, canvasH);
-      const x0 = Math.min(startPosRef.current.x, pos.x);
-      const y0 = Math.min(startPosRef.current.y, pos.y);
-      const w = Math.abs(pos.x - startPosRef.current.x);
-      const h = Math.abs(pos.y - startPosRef.current.y);
       overlay.save();
       overlay.lineWidth = 1;
       overlay.setLineDash([3, 3]);
-      overlay.strokeStyle = "#000";
-      overlay.strokeRect(x0 + 0.5, y0 + 0.5, w, h);
-      overlay.lineDashOffset = 3;
-      overlay.strokeStyle = "#FFF";
-      overlay.strokeRect(x0 + 0.5, y0 + 0.5, w, h);
+      if (selectMode === "lasso") {
+        // Only record points that move enough to matter (≥1 px), keeps
+        // the polygon manageable even on long drags
+        const last = lassoPointsRef.current[lassoPointsRef.current.length - 1];
+        if (!last || Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) >= 1) {
+          lassoPointsRef.current.push({ x: pos.x, y: pos.y });
+        }
+        const pts = lassoPointsRef.current;
+        const path = new Path2D();
+        path.moveTo(pts[0].x + 0.5, pts[0].y + 0.5);
+        for (let i = 1; i < pts.length; i++) path.lineTo(pts[i].x + 0.5, pts[i].y + 0.5);
+        overlay.strokeStyle = "#000";
+        overlay.stroke(path);
+        overlay.lineDashOffset = 3;
+        overlay.strokeStyle = "#FFF";
+        overlay.stroke(path);
+      } else {
+        const x0 = Math.min(startPosRef.current.x, pos.x);
+        const y0 = Math.min(startPosRef.current.y, pos.y);
+        const w = Math.abs(pos.x - startPosRef.current.x);
+        const h = Math.abs(pos.y - startPosRef.current.y);
+        overlay.strokeStyle = "#000";
+        overlay.strokeRect(x0 + 0.5, y0 + 0.5, w, h);
+        overlay.lineDashOffset = 3;
+        overlay.strokeStyle = "#FFF";
+        overlay.strokeRect(x0 + 0.5, y0 + 0.5, w, h);
+      }
       overlay.restore();
     }
-  }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased]);
+  }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased, selectMode]);
 
   const onMouseUp = useCallback((e: React.MouseEvent) => {
     if (!drawingRef.current) return;
@@ -1235,18 +1268,45 @@ export default function Editor() {
       drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
       saveLiveCanvas();
     } else if (tool === "select") {
-      const x0 = Math.min(startPosRef.current.x, pos.x);
-      const y0 = Math.min(startPosRef.current.y, pos.y);
-      const w = Math.abs(pos.x - startPosRef.current.x);
-      const h = Math.abs(pos.y - startPosRef.current.y);
-      const cx = Math.max(0, Math.min(canvasW, x0));
-      const cy = Math.max(0, Math.min(canvasH, y0));
-      const cw = Math.max(0, Math.min(canvasW - cx, w));
-      const ch = Math.max(0, Math.min(canvasH - cy, h));
-      if (cw >= 2 && ch >= 2) {
-        setSelection({ x: cx, y: cy, w: cw, h: ch });
+      if (selectMode === "lasso") {
+        const pts = lassoPointsRef.current;
+        // Need at least a triangle to be a useful polygon
+        if (pts.length >= 3) {
+          // Clamp points to canvas and compute bbox
+          const clamped = pts.map(p => ({
+            x: Math.max(0, Math.min(canvasW, p.x)),
+            y: Math.max(0, Math.min(canvasH, p.y)),
+          }));
+          let minX = clamped[0].x, maxX = clamped[0].x;
+          let minY = clamped[0].y, maxY = clamped[0].y;
+          for (const p of clamped) {
+            if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+          }
+          const bw = maxX - minX, bh = maxY - minY;
+          if (bw >= 2 && bh >= 2) {
+            setSelection({ kind: "lasso", points: clamped, bbox: { x: minX, y: minY, w: bw, h: bh } });
+          } else {
+            setSelection(null);
+          }
+        } else {
+          setSelection(null);
+        }
+        lassoPointsRef.current = [];
       } else {
-        setSelection(null);
+        const x0 = Math.min(startPosRef.current.x, pos.x);
+        const y0 = Math.min(startPosRef.current.y, pos.y);
+        const w = Math.abs(pos.x - startPosRef.current.x);
+        const h = Math.abs(pos.y - startPosRef.current.y);
+        const cx = Math.max(0, Math.min(canvasW, x0));
+        const cy = Math.max(0, Math.min(canvasH, y0));
+        const cw = Math.max(0, Math.min(canvasW - cx, w));
+        const ch = Math.max(0, Math.min(canvasH - cy, h));
+        if (cw >= 2 && ch >= 2) {
+          setSelection({ kind: "rect", x: cx, y: cy, w: cw, h: ch });
+        } else {
+          setSelection(null);
+        }
       }
     }
 
@@ -1255,7 +1315,7 @@ export default function Editor() {
     if (overlay && tool !== "select") overlay.clearRect(0, 0, canvasW, canvasH);
     startPosRef.current = null;
     lastPosRef.current = null;
-  }, [tool, fgColor, bgColor, brushSize, zoom, aliased]);
+  }, [tool, fgColor, bgColor, brushSize, zoom, aliased, selectMode]);
 
   const onMouseLeave = useCallback(() => {
     setMousePos(null);
@@ -1286,8 +1346,22 @@ export default function Editor() {
   useEffect(() => { textFontIdxRef.current = textFontIdx; }, [textFontIdx]);
   useEffect(() => { textSizeRef.current = textSize; }, [textSize]);
   useEffect(() => { selectionRef.current = selection; }, [selection]);
+  useEffect(() => { selectModeRef.current = selectMode; }, [selectMode]);
 
-  // Marching-ants animation: redraws the selection rectangle on the overlay
+  // Build a Path2D from any selection shape (rect or lasso polygon).
+  function selectionPath(sel: Selection): Path2D {
+    const p = new Path2D();
+    if (sel.kind === "rect") {
+      p.rect(sel.x + 0.5, sel.y + 0.5, sel.w, sel.h);
+    } else {
+      p.moveTo(sel.points[0].x + 0.5, sel.points[0].y + 0.5);
+      for (let i = 1; i < sel.points.length; i++) p.lineTo(sel.points[i].x + 0.5, sel.points[i].y + 0.5);
+      p.closePath();
+    }
+    return p;
+  }
+
+  // Marching-ants animation: redraws the selection outline on the overlay
   // with a stepping dash offset, ~6 fps so it doesn't burn CPU.
   useEffect(() => {
     if (!selection) {
@@ -1301,32 +1375,39 @@ export default function Editor() {
       if (!ov) return;
       ov.clearRect(0, 0, canvasW, canvasH);
       const dash = Math.max(2, Math.round(Math.min(canvasW, canvasH) / 100));
+      const path = selectionPath(selection);
       ov.save();
       ov.lineWidth = 1;
       ov.setLineDash([dash, dash]);
       ov.lineDashOffset = -antsOffsetRef.current;
       ov.strokeStyle = "#000000";
-      ov.strokeRect(selection.x + 0.5, selection.y + 0.5, selection.w, selection.h);
+      ov.stroke(path);
       ov.lineDashOffset = -antsOffsetRef.current + dash;
       ov.strokeStyle = "#FFFFFF";
-      ov.strokeRect(selection.x + 0.5, selection.y + 0.5, selection.w, selection.h);
+      ov.stroke(path);
       ov.restore();
     }, 160);
     return () => clearInterval(id);
   }, [selection, canvasW, canvasH]);
 
-  // Keyboard shortcuts for selection (ESC clears, Backspace/Delete erases)
+  // Keyboard shortcuts for selection + clipboard
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const tgt = e.target as HTMLElement | null;
       if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
-      if (!selectionRef.current) return;
-      if (e.key === "Escape") {
-        setSelection(null);
-        e.preventDefault();
-      } else if (e.key === "Delete" || e.key === "Backspace") {
-        eraseSelection();
-        e.preventDefault();
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === "c" || e.key === "C")) {
+        if (selectionRef.current) { copySelection(); e.preventDefault(); }
+      } else if (mod && (e.key === "x" || e.key === "X")) {
+        if (selectionRef.current) { copySelection(); eraseSelection(); e.preventDefault(); }
+      } else if (mod && (e.key === "v" || e.key === "V")) {
+        if (clipboardRef.current) { pasteClipboard(); e.preventDefault(); }
+      } else if (selectionRef.current) {
+        if (e.key === "Escape") {
+          setSelection(null); e.preventDefault();
+        } else if (e.key === "Delete" || e.key === "Backspace") {
+          eraseSelection(); e.preventDefault();
+        }
       }
     }
     window.addEventListener("keydown", onKey);
@@ -1479,27 +1560,36 @@ export default function Editor() {
 
   // -------------------- Selection actions --------------------
 
-  // Fill the selection rect with bgColor on the current frame.
+  function selBox(sel: Selection): { x: number; y: number; w: number; h: number } {
+    return sel.kind === "rect" ? sel : sel.bbox;
+  }
+
+  // Fill the selection with bgColor on the current frame. For lasso the
+  // fill is masked via Path2D clip so only the polygon area is touched.
   function eraseSelection() {
     const sel = selectionRef.current;
     if (!sel) return;
     const ctx = getCtx();
     if (!ctx) return;
     ctx.save();
+    if (sel.kind === "lasso") ctx.clip(selectionPath(sel));
     ctx.fillStyle = bgColor;
-    ctx.fillRect(sel.x, sel.y, sel.w, sel.h);
+    const b = selBox(sel);
+    ctx.fillRect(b.x, b.y, b.w, b.h);
     ctx.restore();
     saveLiveCanvas();
     saveCurrentFrame();
   }
 
-  // Crop every frame to the selection. Adjusts the canvas dimensions too.
+  // Crop every frame to the selection's bounding box. Adjusts canvas
+  // dimensions too. For lasso, the polygon mask is also applied so areas
+  // outside the polygon become transparent / bg-fill.
   function cropToSelection() {
     const sel = selectionRef.current;
     if (!sel) return;
-    if (sel.w < 1 || sel.h < 1) return;
+    const b = selBox(sel);
+    if (b.w < 1 || b.h < 1) return;
     stopPlayback();
-    // Persist any unsaved live edits before slicing
     const ctx = getCtx();
     if (ctx) framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
     const tmp = document.createElement("canvas");
@@ -1510,18 +1600,79 @@ export default function Editor() {
       if (!img) return null;
       tctx.putImageData(img, 0, 0);
       const out = document.createElement("canvas");
-      out.width = sel.w;
-      out.height = sel.h;
+      out.width = b.w;
+      out.height = b.h;
       const octx = out.getContext("2d")!;
-      octx.drawImage(tmp, sel.x, sel.y, sel.w, sel.h, 0, 0, sel.w, sel.h);
-      return octx.getImageData(0, 0, sel.w, sel.h);
+      if (sel.kind === "lasso") {
+        // Translate the polygon into the cropped canvas's local space
+        const local = new Path2D();
+        local.moveTo(sel.points[0].x - b.x, sel.points[0].y - b.y);
+        for (let i = 1; i < sel.points.length; i++) local.lineTo(sel.points[i].x - b.x, sel.points[i].y - b.y);
+        local.closePath();
+        octx.save();
+        octx.clip(local);
+        octx.drawImage(tmp, -b.x, -b.y);
+        octx.restore();
+      } else {
+        octx.drawImage(tmp, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+      }
+      return octx.getImageData(0, 0, b.w, b.h);
     });
     liveDataRef.current = framesDataRef.current[currentFrameRef.current] ?? null;
-    setCanvasW(sel.w);
-    setCanvasH(sel.h);
-    canvasWRef.current = sel.w;
-    canvasHRef.current = sel.h;
+    setCanvasW(b.w);
+    setCanvasH(b.h);
+    canvasWRef.current = b.w;
+    canvasHRef.current = b.h;
     setSelection(null);
+  }
+
+  // Snapshot the selected pixels into the clipboard. Lasso uses Path2D
+  // clipping so only the polygon's pixels are captured (rest stays
+  // transparent).
+  function copySelection() {
+    const sel = selectionRef.current;
+    if (!sel) return;
+    const src = canvasRef.current;
+    if (!src) return;
+    const b = selBox(sel);
+    if (b.w < 1 || b.h < 1) return;
+    const off = document.createElement("canvas");
+    off.width = b.w;
+    off.height = b.h;
+    const octx = off.getContext("2d")!;
+    octx.imageSmoothingEnabled = false;
+    if (sel.kind === "lasso") {
+      const local = new Path2D();
+      local.moveTo(sel.points[0].x - b.x, sel.points[0].y - b.y);
+      for (let i = 1; i < sel.points.length; i++) local.lineTo(sel.points[i].x - b.x, sel.points[i].y - b.y);
+      local.closePath();
+      octx.save();
+      octx.clip(local);
+      octx.drawImage(src, -b.x, -b.y);
+      octx.restore();
+    } else {
+      octx.drawImage(src, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+    }
+    clipboardRef.current = { canvas: off, x: b.x, y: b.y };
+    setClipboardKey(k => k + 1);
+  }
+
+  // Paste the clipboard onto the current frame at its original position,
+  // then create a fresh rect selection over the pasted area so the user
+  // can move/erase/copy it again.
+  function pasteClipboard() {
+    const cb = clipboardRef.current;
+    if (!cb) return;
+    const ctx = getCtx();
+    if (!ctx) return;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(cb.canvas, cb.x, cb.y);
+    ctx.restore();
+    saveLiveCanvas();
+    saveCurrentFrame();
+    setSelection({ kind: "rect", x: cb.x, y: cb.y, w: cb.canvas.width, h: cb.canvas.height });
+    setTool("select");
   }
 
   // Nearest-neighbor rescale via an offscreen canvas (imageSmoothingEnabled off).
@@ -2004,40 +2155,66 @@ export default function Editor() {
         </div>
       </div>
 
-      {/* SELECTION ACTIONS (visible when a selection rect exists) */}
-      {selection && (
+      {/* SELECTION CONFIG + ACTIONS — visible when the SÉLECTION tool is
+          active OR when there's already a selection on the canvas. */}
+      {(tool === "select" || selection) && (
         <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <div style={{ color: t.panelText, fontSize: 14, fontWeight: "bold" }}>SÉLECTION :</div>
-            <div style={{ color: t.panelText, fontSize: 12, opacity: 0.7, fontVariantNumeric: "tabular-nums" }}>
-              {selection.x},{selection.y} · {selection.w}×{selection.h} px
+
+            {/* Mode toggle (RECT / LASSO) */}
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <button
+                className="amiga-button"
+                data-active={selectMode === "rect"}
+                onClick={() => setSelectMode("rect")}
+                title="Sélection rectangulaire"
+                style={{ padding: "2px 8px" }}
+              >RECT</button>
+              <button
+                className="amiga-button"
+                data-active={selectMode === "lasso"}
+                onClick={() => setSelectMode("lasso")}
+                title="Sélection libre (lasso)"
+                style={{ padding: "2px 8px" }}
+              >LASSO</button>
             </div>
+
+            {selection && (
+              <div style={{ color: t.panelText, fontSize: 12, opacity: 0.7, fontVariantNumeric: "tabular-nums" }}>
+                {(() => {
+                  const b = selection.kind === "rect" ? selection : selection.bbox;
+                  return `${selection.kind === "lasso" ? "⌒ " : ""}${b.x},${b.y} · ${b.w}×${b.h} px`;
+                })()}
+              </div>
+            )}
+
+            {selection && (
+              <>
+                <button className="amiga-button" onClick={copySelection} title="Copier (⌘C)" style={{ padding: "2px 10px" }}>COPIER</button>
+                <button className="amiga-button" onClick={() => { copySelection(); eraseSelection(); }} title="Couper (⌘X)" style={{ padding: "2px 10px" }}>COUPER</button>
+              </>
+            )}
+            {/* Paste is available whenever the clipboard has content,
+                even without an active selection on the canvas. */}
             <button
+              key={clipboardKey}
               className="amiga-button"
-              onClick={cropToSelection}
-              title="Recadre le canvas (et toutes les frames) à la sélection"
-              style={{ padding: "2px 10px" }}
-            >
-              ✂ DÉTOURER
-            </button>
-            <button
-              className="amiga-button"
-              onClick={eraseSelection}
-              title="Efface le contenu de la sélection (couleur de fond)"
-              style={{ padding: "2px 10px" }}
-            >
-              EFFACER
-            </button>
-            <button
-              className="amiga-button"
-              onClick={() => setSelection(null)}
-              title="Annule la sélection (ESC)"
-              style={{ padding: "2px 10px" }}
-            >
-              ANNULER
-            </button>
+              onClick={pasteClipboard}
+              disabled={!clipboardRef.current}
+              title="Coller (⌘V) — colle au point d'origine"
+              style={{ padding: "2px 10px", opacity: clipboardRef.current ? 1 : 0.4 }}
+            >COLLER</button>
+            {selection && (
+              <>
+                <button className="amiga-button" onClick={cropToSelection} title="Recadre le canvas (et toutes les frames) à la sélection" style={{ padding: "2px 10px" }}>✂ DÉTOURER</button>
+                <button className="amiga-button" onClick={eraseSelection} title="Efface le contenu (couleur de fond)" style={{ padding: "2px 10px" }}>EFFACER</button>
+                <button className="amiga-button" onClick={() => setSelection(null)} title="Annule la sélection (ESC)" style={{ padding: "2px 10px" }}>ANNULER</button>
+              </>
+            )}
+
             <div style={{ color: t.panelText, opacity: 0.55, fontSize: 12, marginLeft: "auto" }}>
-              DEL POUR EFFACER · ESC POUR ANNULER
+              ⌘C/⌘X/⌘V · DEL EFFACER · ESC ANNULER
             </div>
           </div>
         </div>
