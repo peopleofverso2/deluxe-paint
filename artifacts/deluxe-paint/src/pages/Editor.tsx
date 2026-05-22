@@ -1068,22 +1068,33 @@ export default function Editor() {
     return c.getContext("2d")!.getImageData(0, 0, c.width, c.height);
   }
 
-  // Thumbnail cache — re-using composites during PLAYBACK kills the
-  // per-tick cost (otherwise FrameThumbs recompute compositeFrameToImageData
-  // for every frame × every layer on every render, which at HD/4K turns
-  // PLAY into a slideshow). Cache is per frame index; flushed on layer
-  // mutations (handled via layerVersion bumps which trigger re-render).
+  // Thumbnail cache — keep composites around so a PLAY tick doesn't have
+  // to recompute every frame × every layer (otherwise at HD/4K the strip
+  // alone burns tens of MB/s of work).
+  //
+  // Validity rules:
+  //   - Only used WHILE playing (during edit the thumb strip is always
+  //     fresh so the user sees their work immediately).
+  //   - Per-frame invalidation in saveLiveCanvas() drops the entry for
+  //     the frame the user just modified.
+  //   - Structural changes (layers, frame count, dims) wipe the whole
+  //     cache via this effect.
+  //   - startPlayback() also wipes defensively so the very first PLAY
+  //     render is guaranteed fresh.
   const thumbCacheRef = useRef<Map<number, ImageData>>(new Map());
+  useEffect(() => {
+    thumbCacheRef.current.clear();
+  }, [layerVersion, frameCount, canvasW, canvasH]);
   function getThumbForRender(i: number): ImageData {
-    // While playing, prefer the cached snapshot to avoid 60+ MB/s of
-    // composite work per second on bigger canvases.
     if (playing) {
-      const c = thumbCacheRef.current.get(i);
-      if (c) return c;
+      const cached = thumbCacheRef.current.get(i);
+      if (cached) return cached;
+      const fresh = compositeFrameToImageData(i);
+      thumbCacheRef.current.set(i, fresh);
+      return fresh;
     }
-    const fresh = compositeFrameToImageData(i);
-    thumbCacheRef.current.set(i, fresh);
-    return fresh;
+    // Not playing → always fresh so edits show up in the strip immediately
+    return compositeFrameToImageData(i);
   }
   // Project-wide frame count is derived from the first layer's frames.
   function frameCountOf() { return layersRef.current[0]?.frames.length ?? 1; }
@@ -1168,7 +1179,12 @@ export default function Editor() {
   // triggers a recomposite so the displayed canvas reflects the latest
   // change to the active layer. loadFrame just composites the new frame.
   function saveCurrentFrame() { /* no-op */ }
-  function saveLiveCanvas()   { composite(); }
+  function saveLiveCanvas() {
+    composite();
+    // Invalidate the thumbnail cache for the frame we just modified so
+    // the next render (or the next playback start) recomputes it.
+    thumbCacheRef.current.delete(currentFrameRef.current);
+  }
   function loadFrame(_idx: number) { composite(); }
 
   function switchToFrame(idx: number) {
@@ -1185,6 +1201,10 @@ export default function Editor() {
     // when a tick takes longer than the interval).
     if (playRafRef.current != null) cancelAnimationFrame(playRafRef.current);
     if (playIntervalRef.current) { clearInterval(playIntervalRef.current); playIntervalRef.current = null; }
+    // Reset the thumb cache so the very first PLAY render captures fresh
+    // composites (covers the "drew on a frame then hit PLAY without any
+    // intervening re-render" case).
+    thumbCacheRef.current.clear();
     setPlaying(true);
     let f = currentFrameRef.current;
     playLastTimeRef.current = performance.now();
@@ -3258,15 +3278,15 @@ export default function Editor() {
             )}
           </div>
 
-          {/* Loop toggle */}
+          {/* Loop toggle — affects PLAY only (boucle infinie vs lecture une fois) */}
           <button
             className="amiga-button"
             data-active={looping}
             onClick={() => { const v = !looping; setLooping(v); loopingRef.current = v; }}
             style={{ padding: "2px 8px", color: looping ? "#00CC44" : t.panelText }}
-            title="BOUCLE"
+            title={looping ? "PLAY boucle à l'infini — clic pour passer en lecture une fois" : "PLAY joue une fois et s'arrête — clic pour activer la boucle"}
           >
-            {looping ? "BOUCLE ON" : "BOUCLE OFF"}
+            {looping ? "↻ BOUCLE" : "→ 1 FOIS"}
           </button>
 
           {/* FPS */}
