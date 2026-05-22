@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { GIFEncoder, quantize, applyPalette } from "gifenc";
+import { api, ApiError, type ApiUser, type ProjectListItem } from "@/lib/api";
 
 type Tool =
   | "pencil"
@@ -823,6 +824,32 @@ export default function Editor() {
   const [theme, setTheme] = useState<"light" | "night">("light");
   const [splashOpen, setSplashOpen] = useState(true);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+
+  // ---- Cloud project state (login + project manager) ----
+  const [currentUser, setCurrentUser] = useState<ApiUser | null>(null);
+  const [showLogin, setShowLogin] = useState(false);
+  const [showProjects, setShowProjects] = useState(false);
+  // Currently-loaded cloud project (so SAVER posts an UPDATE, not a new row)
+  const [cloudProject, setCloudProject] = useState<{ id: string; name: string; ownerId: string } | null>(null);
+  // Fetch current user on mount
+  useEffect(() => {
+    api.me().then(r => setCurrentUser(r.user)).catch(() => setCurrentUser(null));
+  }, []);
+  // If the URL is /p/:id, fetch and load that project on mount
+  useEffect(() => {
+    const m = window.location.pathname.match(/^\/p\/([A-Za-z0-9-]+)/);
+    if (!m) return;
+    const id = m[1];
+    api.getProject(id).then(r => {
+      loadProjectData(r.project.data, r.project.name);
+      setCloudProject({ id: r.project.id, name: r.project.name, ownerId: r.project.ownerId });
+    }).catch(err => {
+      console.error("Failed to load shared project:", err);
+      // Reset URL so subsequent navigation isn't stuck on a broken /p/:id
+      window.history.replaceState({}, "", "/");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const activePalette = PALETTES.find(p => p.id === paletteId) ?? PALETTES[0];
   const t = THEMES[theme];
@@ -2479,6 +2506,148 @@ export default function Editor() {
     }
   }
 
+  // Build the same payload as a .dpaint file (so save-to-cloud and
+  // save-to-disk emit the same structure).
+  function buildProjectPayload() {
+    const layers = layersRef.current.map(layer => ({
+      id: layer.id,
+      name: layer.name,
+      visible: layer.visible,
+      opacity: layer.opacity,
+      frames: layer.frames.map(c => c ? c.toDataURL("image/png") : null),
+    }));
+    return {
+      format: "dpaint-project" as const,
+      version: 2,
+      width: canvasW,
+      height: canvasH,
+      fps,
+      looping,
+      currentFrame,
+      activeLayerIdx,
+      layers,
+    };
+  }
+
+  // Replace the in-memory project state with a freshly loaded payload.
+  // Used by both the file-input loader and the /p/:id deep-link loader.
+  async function loadProjectData(data: unknown, _suggestedName?: string) {
+    if (typeof data !== "object" || data === null) throw new Error("Format inconnu");
+    const d = data as {
+      format?: string; width?: number; height?: number; fps?: number; looping?: boolean;
+      currentFrame?: number; activeLayerIdx?: number;
+      layers?: Array<{ id?: string; name?: string; visible?: boolean; opacity?: number; frames: (string | null)[] }>;
+      frames?: (string | null)[];
+    };
+    if (d.format !== "dpaint-project") throw new Error("Format inconnu (attendu : dpaint-project)");
+    const targetW = typeof d.width === "number" && d.width > 0 ? d.width : canvasW;
+    const targetH = typeof d.height === "number" && d.height > 0 ? d.height : canvasH;
+    stopPlayback();
+
+    const loadCanvas = (url: string | null): Promise<HTMLCanvasElement | null> => {
+      if (!url) return Promise.resolve(null);
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const c = makeLayerCanvas(targetW, targetH);
+          const cx = c.getContext("2d")!;
+          cx.imageSmoothingEnabled = false;
+          cx.drawImage(img, 0, 0);
+          resolve(c);
+        };
+        img.onerror = () => reject(new Error("Frame illisible"));
+        img.src = url;
+      });
+    };
+
+    let newLayers: Layer[];
+    if (Array.isArray(d.layers)) {
+      newLayers = await Promise.all(
+        d.layers.map(async (l, i) => {
+          const frames = await Promise.all((l.frames ?? []).map(loadCanvas));
+          return {
+            id: l.id ?? `${Date.now().toString(36)}-${i}`,
+            name: l.name ?? `CALQUE ${i + 1}`,
+            visible: typeof l.visible === "boolean" ? l.visible : true,
+            opacity: typeof l.opacity === "number" ? l.opacity : 1,
+            frames,
+          } as Layer;
+        })
+      );
+    } else if (Array.isArray(d.frames)) {
+      const frames = await Promise.all(d.frames.map(loadCanvas));
+      newLayers = [{ id: `${Date.now().toString(36)}-1`, name: "CALQUE 1", visible: true, opacity: 1, frames }];
+    } else {
+      throw new Error("Aucun calque ni frame dans le projet");
+    }
+
+    if (targetW !== canvasW || targetH !== canvasH) {
+      setCanvasW(targetW); setCanvasH(targetH);
+      canvasWRef.current = targetW; canvasHRef.current = targetH;
+    }
+    layersRef.current = newLayers.length ? newLayers : [makeLayer("CALQUE 1", 1)];
+    const n = frameCountOf();
+    frameCountRef.current = n;
+    setFrameCount(n);
+    clearHistory();
+    if (typeof d.fps === "number") setFps(d.fps);
+    if (typeof d.looping === "boolean") { setLooping(d.looping); loopingRef.current = d.looping; }
+    const startFrame = typeof d.currentFrame === "number" ? Math.min(Math.max(0, d.currentFrame), n - 1) : 0;
+    currentFrameRef.current = startFrame;
+    setCurrentFrame(startFrame);
+    const startLayer = typeof d.activeLayerIdx === "number" ? Math.min(Math.max(0, d.activeLayerIdx), layersRef.current.length - 1) : 0;
+    setActiveLayerIdx(startLayer); activeLayerIdxRef.current = startLayer;
+    bumpLayers();
+    composite();
+  }
+
+  // ---- Cloud save / save-as / open ----
+  async function handleCloudSave() {
+    if (!currentUser) { setShowLogin(true); return; }
+    const payload = buildProjectPayload();
+    try {
+      if (cloudProject && cloudProject.ownerId === currentUser.id) {
+        const r = await api.updateProject(cloudProject.id, { data: payload });
+        setCloudProject({ id: r.project.id, name: r.project.name, ownerId: currentUser.id });
+        alert(`✓ Projet sauvegardé : ${r.project.name}`);
+      } else {
+        const defaultName = cloudProject?.name || `Projet du ${new Date().toLocaleDateString("fr-FR")}`;
+        const name = prompt("Nom du projet :", defaultName);
+        if (!name) return;
+        const r = await api.createProject({ name, data: payload, isPublic: true });
+        setCloudProject({ id: r.project.id, name: r.project.name, ownerId: currentUser.id });
+        // Update URL so the share link points at this project
+        window.history.replaceState({}, "", `/p/${r.project.id}`);
+        alert(`✓ Projet créé : ${r.project.name}\nURL partageable : ${window.location.href}`);
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      alert("Erreur de sauvegarde : " + msg);
+    }
+  }
+
+  async function handleCloudOpen(id: string) {
+    try {
+      const r = await api.getProject(id);
+      await loadProjectData(r.project.data, r.project.name);
+      setCloudProject({ id: r.project.id, name: r.project.name, ownerId: r.project.ownerId });
+      window.history.replaceState({}, "", `/p/${r.project.id}`);
+      setShowProjects(false);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      alert("Impossible d'ouvrir : " + msg);
+    }
+  }
+
+  function handleShareLink() {
+    if (!cloudProject) { alert("Sauvegarde le projet d'abord pour obtenir un lien."); return; }
+    const url = `${window.location.origin}/p/${cloudProject.id}`;
+    navigator.clipboard?.writeText(url).then(
+      () => alert(`Lien copié :\n${url}`),
+      () => prompt("Copie le lien :", url),
+    );
+  }
+
   function handleSaveProject() {
     // version 2: layers as tracks. Each layer carries meta + an array of
     // dataURLs (or nulls) for its per-frame canvases.
@@ -2699,6 +2868,26 @@ export default function Editor() {
       {/* SPLASH */}
       {splashOpen && <SplashScreen theme={t} onDismiss={() => setSplashOpen(false)} />}
 
+      {/* LOGIN MODAL */}
+      {showLogin && (
+        <LoginModal
+          theme={t}
+          onClose={() => setShowLogin(false)}
+          onSuccess={() => { setShowLogin(false); api.me().then(r => setCurrentUser(r.user)).catch(() => {}); }}
+        />
+      )}
+
+      {/* PROJECTS MODAL */}
+      {showProjects && (
+        <ProjectsModal
+          theme={t}
+          currentUser={currentUser}
+          onClose={() => setShowProjects(false)}
+          onOpen={handleCloudOpen}
+          onRequireLogin={() => { setShowProjects(false); setShowLogin(true); }}
+        />
+      )}
+
       {/* MENUBAR */}
       <div style={{ display: "flex", alignItems: "center", background: t.menubar, borderBottom: `1px solid ${t.border}`, padding: "0 4px", flexShrink: 0, height: 28 }}>
         <MenuDropdown label="IMAGE" items={(() => {
@@ -2707,6 +2896,10 @@ export default function Editor() {
           return [
             { label: "NOUVEAU", action: handleNew },
             { label: "IMPORTER IMAGE (PNG/JPG/SVG)", action: handleImportImage },
+            { label: "▸ MES PROJETS (CLOUD)", action: () => setShowProjects(true) },
+            { label: "▸ SAUVER DANS LE CLOUD", action: handleCloudSave },
+            { label: "▸ COPIER LIEN PARTAGEABLE", action: handleShareLink },
+            { label: "—", action: () => {} },
             { label: "OUVRIR PROJET (.dpaint)", action: handleOpenProject },
             { label: "SAUVER PROJET (.dpaint)", action: handleSaveProject },
             { label: "SAUVER FRAME (PNG)", action: handleSave },
@@ -2803,8 +2996,32 @@ export default function Editor() {
         >
           {theme === "night" ? "☾ NUIT" : "☀ JOUR"}
         </button>
-        <div style={{ marginLeft: "auto", color: t.menubarText, fontSize: 14, paddingRight: 8, letterSpacing: 1 }}>
-          DELUXE PAINT · PEOPLE OF VERSO
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          {currentUser ? (
+            <>
+              <span style={{ color: t.menubarText, fontSize: 12, opacity: 0.85 }}>{currentUser.email}</span>
+              <button
+                className="amiga-button"
+                onClick={async () => {
+                  try { await api.logout(); } catch {}
+                  setCurrentUser(null);
+                  setCloudProject(null);
+                }}
+                title="Se déconnecter"
+                style={{ padding: "2px 10px", height: 24 }}
+              >LOGOUT</button>
+            </>
+          ) : (
+            <button
+              className="amiga-button"
+              onClick={() => setShowLogin(true)}
+              title="Se connecter pour sauvegarder dans le cloud"
+              style={{ padding: "2px 10px", height: 24 }}
+            >LOGIN</button>
+          )}
+          <div style={{ color: t.menubarText, fontSize: 14, paddingRight: 8, letterSpacing: 1 }}>
+            DELUXE PAINT · PEOPLE OF VERSO
+          </div>
         </div>
       </div>
 
@@ -3496,6 +3713,179 @@ function MenuDropdown({ label, items }: { label: string; items: { label: string;
 
 // Splash screen — full-screen overlay shown on app load, click/key dismisses.
 // Auto-hides after 2.5s if untouched.
+// Common modal shell — backdrop + centered card
+function ModalShell({ theme: t, onClose, children, width = 480 }: { theme: ThemeColors; onClose: () => void; children: React.ReactNode; width?: number }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 9000,
+      background: "rgba(0,0,0,0.55)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontFamily: "'VT323', monospace",
+    }}>
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: t.panel, color: t.panelText,
+          border: `1px solid ${t.border}`,
+          padding: 24, width: "90%", maxWidth: width, maxHeight: "90vh", overflow: "auto",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function LoginModal({ theme: t, onClose, onSuccess }: { theme: ThemeColors; onClose: () => void; onSuccess: () => void }) {
+  const [email, setEmail] = useState("");
+  const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [error, setError] = useState("");
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!email.trim()) return;
+    setStatus("sending"); setError("");
+    try {
+      await api.login(email);
+      setStatus("sent");
+    } catch (err) {
+      setStatus("error");
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  }
+  return (
+    <ModalShell theme={t} onClose={onClose} width={420}>
+      <h2 style={{ fontSize: 22, margin: "0 0 16px", letterSpacing: 1 }}>CONNEXION</h2>
+      {status === "sent" ? (
+        <div>
+          <p>📧 Vérifie ta boîte <strong>{email}</strong>.</p>
+          <p style={{ fontSize: 13, opacity: 0.75 }}>
+            On t'a envoyé un lien magique. Clique-le pour te connecter (valable 15 minutes).
+            Il s'ouvre dans ce navigateur et te ramène ici.
+          </p>
+          <button className="amiga-button" onClick={onSuccess} style={{ padding: "6px 14px", marginTop: 16 }}>OK</button>
+        </div>
+      ) : (
+        <form onSubmit={submit}>
+          <p style={{ marginTop: 0, fontSize: 13, opacity: 0.75 }}>
+            Connexion sans mot de passe. Entre ton email, on t'envoie un lien magique à cliquer.
+          </p>
+          <input
+            type="email"
+            autoFocus
+            required
+            placeholder="email@exemple.com"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            disabled={status === "sending"}
+            style={{
+              width: "100%", boxSizing: "border-box",
+              padding: "8px 10px", marginTop: 8,
+              background: "#FFF", color: "#000",
+              border: `2px solid ${t.border}`,
+              fontFamily: "'VT323', monospace", fontSize: 18,
+            }}
+          />
+          {error && <div style={{ color: "#C04849", marginTop: 8, fontSize: 13 }}>{error}</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 16, justifyContent: "flex-end" }}>
+            <button type="button" className="amiga-button" onClick={onClose} style={{ padding: "6px 14px" }}>ANNULER</button>
+            <button type="submit" className="amiga-button" disabled={status === "sending"} style={{ padding: "6px 14px", fontWeight: "bold" }}>
+              {status === "sending" ? "ENVOI…" : "ENVOYER LE LIEN"}
+            </button>
+          </div>
+        </form>
+      )}
+    </ModalShell>
+  );
+}
+
+function ProjectsModal({ theme: t, currentUser, onClose, onOpen, onRequireLogin }: {
+  theme: ThemeColors;
+  currentUser: ApiUser | null;
+  onClose: () => void;
+  onOpen: (id: string) => Promise<void>;
+  onRequireLogin: () => void;
+}) {
+  const [projects, setProjects] = useState<ProjectListItem[] | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    if (!currentUser) { setLoading(false); return; }
+    api.listProjects()
+      .then(r => { setProjects(r.projects); setLoading(false); })
+      .catch(err => { setError(err instanceof ApiError ? err.message : String(err)); setLoading(false); });
+  }, [currentUser]);
+  async function del(id: string, name: string) {
+    if (!confirm(`Supprimer définitivement "${name}" ?`)) return;
+    try {
+      await api.deleteProject(id);
+      setProjects(p => p?.filter(x => x.id !== id) ?? null);
+    } catch (err) {
+      alert("Erreur : " + (err instanceof ApiError ? err.message : String(err)));
+    }
+  }
+  function copyLink(id: string) {
+    const url = `${window.location.origin}/p/${id}`;
+    navigator.clipboard?.writeText(url).then(
+      () => alert(`Lien copié :\n${url}`),
+      () => prompt("Copie le lien :", url),
+    );
+  }
+  return (
+    <ModalShell theme={t} onClose={onClose} width={640}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <h2 style={{ fontSize: 22, margin: 0, letterSpacing: 1 }}>MES PROJETS</h2>
+        <button className="amiga-button" onClick={onClose} style={{ padding: "4px 10px" }}>×</button>
+      </div>
+      {!currentUser ? (
+        <div>
+          <p style={{ opacity: 0.8 }}>Connecte-toi pour accéder à tes projets sauvegardés dans le cloud.</p>
+          <button className="amiga-button" onClick={onRequireLogin} style={{ padding: "6px 14px", marginTop: 8, fontWeight: "bold" }}>
+            SE CONNECTER
+          </button>
+        </div>
+      ) : loading ? (
+        <div style={{ opacity: 0.7 }}>Chargement…</div>
+      ) : error ? (
+        <div style={{ color: "#C04849" }}>{error}</div>
+      ) : !projects || projects.length === 0 ? (
+        <div style={{ opacity: 0.7 }}>
+          Aucun projet pour l'instant. Crée une animation puis utilise <strong>IMAGE › SAUVER DANS LE CLOUD</strong>.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {projects.map(p => (
+            <div key={p.id} style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "8px 10px",
+              border: `1px solid ${t.border}`,
+              background: "transparent",
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 16, fontWeight: "bold", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {p.name}
+                </div>
+                <div style={{ fontSize: 11, opacity: 0.7, fontVariantNumeric: "tabular-nums" }}>
+                  {p.width}×{p.height} · {p.frameCount} frame{p.frameCount > 1 ? "s" : ""}
+                  {" · "}{p.isPublic ? "public" : "privé"}
+                  {" · "}MAJ {new Date(p.updatedAt).toLocaleString("fr-FR")}
+                </div>
+              </div>
+              <button className="amiga-button" onClick={() => onOpen(p.id)} title="Ouvrir" style={{ padding: "4px 10px" }}>OUVRIR</button>
+              <button className="amiga-button" onClick={() => copyLink(p.id)} title="Copier le lien partageable" style={{ padding: "4px 10px" }}>LIEN</button>
+              <button className="amiga-button" onClick={() => del(p.id, p.name)} title="Supprimer" style={{ padding: "4px 10px", color: "#C04849" }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </ModalShell>
+  );
+}
+
 function SplashScreen({ theme: t, onDismiss }: { theme: ThemeColors; onDismiss: () => void }) {
   useEffect(() => {
     const onKey = () => onDismiss();
