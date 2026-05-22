@@ -101,8 +101,10 @@ const THEMES: Record<ThemeId, ThemeColors> = {
     bg: "#0A0A0A",
     panel: "#1A1A1A",
     panelText: "#F0EFED",
-    menubar: "#FF1F1F",
-    menubarText: "#FFFFFF",
+    // Dark menubar with the red as an accent underline (cleaner contrast
+    // for the buttons sitting on top of it than a full-red bar).
+    menubar: "#141414",
+    menubarText: "#F0EFED",
     canvasBg: "#000000",
     accent: "#FF3030",
     border: "#FF3030",
@@ -1624,7 +1626,7 @@ export default function Editor() {
           onClick={() => setFit(v => !v)}
           data-active={fit}
           title="REMPLIR LA FENÊTRE (AUTO-ZOOM)"
-          style={{ padding: "2px 10px", height: 24, color: "#000", marginLeft: 4 }}
+          style={{ padding: "2px 10px", height: 24, marginLeft: 4 }}
         >
           {fit ? "FIT ON" : "FIT"}
         </button>
@@ -1633,7 +1635,7 @@ export default function Editor() {
           onClick={() => { setFit(false); setZoom(12); }}
           data-active={!fit && zoom === 12}
           title="ZOOM x12 — REMPLIT UN ÉCRAN 4K"
-          style={{ padding: "2px 10px", height: 24, color: "#000", marginLeft: 4 }}
+          style={{ padding: "2px 10px", height: 24, marginLeft: 4 }}
         >
           4K
         </button>
@@ -1642,7 +1644,7 @@ export default function Editor() {
           onClick={() => setAliased(v => !v)}
           data-active={aliased}
           title={aliased ? "RENDU ALIASÉ (PIXEL ART)" : "RENDU LISSÉ (ANTI-ALIASING)"}
-          style={{ padding: "2px 10px", height: 24, color: "#000", marginLeft: 4 }}
+          style={{ padding: "2px 10px", height: 24, marginLeft: 4 }}
         >
           {aliased ? "ALIAS ON" : "ALIAS OFF"}
         </button>
@@ -1655,7 +1657,7 @@ export default function Editor() {
           onClick={() => setTheme(theme === "light" ? "night" : "light")}
           data-active={theme === "night"}
           title="THÈME — JOUR / NUIT"
-          style={{ padding: "2px 10px", height: 24, color: t.panelText, marginLeft: 4 }}
+          style={{ padding: "2px 10px", height: 24, marginLeft: 4 }}
         >
           {theme === "night" ? "☾ NUIT" : "☀ JOUR"}
         </button>
@@ -2112,7 +2114,7 @@ function MenuDropdown({ label, items }: { label: string; items: { label: string;
       <button
         className="amiga-button"
         onClick={() => setOpen(v => !v)}
-        style={{ padding: "2px 10px", height: 24, color: "#000" }}
+        style={{ padding: "2px 10px", height: 24 }}
       >
         {label}
       </button>
@@ -2151,8 +2153,8 @@ function SplashScreen({ theme: t, onDismiss }: { theme: ThemeColors; onDismiss: 
         position: "fixed",
         inset: 0,
         zIndex: 9999,
-        background: t.menubar,
-        color: t.menubarText,
+        background: t.bg,
+        color: t.panelText,
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
