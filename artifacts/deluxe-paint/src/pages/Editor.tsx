@@ -74,6 +74,24 @@ const NEON_PALETTE = [
   "#00B7FF","#3A00FF","#FFFFFF","#C0C0C0",
 ];
 
+// Bauhaus — Itten / Kandinsky primary triad (red / yellow / blue) plus
+// black / white and warm sand/ochre supporting tones. Sober and constructed.
+const BAUHAUS_PALETTE = [
+  "#FFFFFF","#F5F0E8","#E8E0CC","#C7B98C",
+  "#FFD500","#F39200","#E2231A","#B41B14",
+  "#5C1E1A","#2A2A2A","#000000","#5F5F5F",
+  "#8A8A8A","#4A6FA5","#1E4DAC","#003D7A",
+];
+
+// Dada — aged paper / newsprint / collage. Sepias and sienna grounds
+// with raw red, mustard and dirty teal splashes.
+const DADA_PALETTE = [
+  "#F5EDDD","#E8DDC4","#C9A878","#8C6E3D",
+  "#6B4226","#3D2F1F","#1A1A1A","#000000",
+  "#D32F2F","#8B2C20","#58202A","#C9A227",
+  "#5A5C36","#2D3A1F","#3A5A6E","#4D6883",
+];
+
 // ---- THEME ----
 type ThemeId = "light" | "night";
 type ThemeColors = {
@@ -120,6 +138,8 @@ const PALETTES = [
   { id: "gameboy", label: "GAME BOY", colors: GAMEBOY_PALETTE, width: 4 },
   { id: "pastel",  label: "PASTEL",   colors: PASTEL_PALETTE,  width: 8 },
   { id: "neon",    label: "NEON",     colors: NEON_PALETTE,    width: 8 },
+  { id: "bauhaus", label: "BAUHAUS",  colors: BAUHAUS_PALETTE, width: 8 },
+  { id: "dada",    label: "DADA",     colors: DADA_PALETTE,    width: 8 },
 ] as const;
 type PaletteId = (typeof PALETTES)[number]["id"];
 
