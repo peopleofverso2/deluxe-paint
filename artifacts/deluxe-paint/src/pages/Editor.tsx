@@ -808,6 +808,14 @@ export default function Editor() {
   // so PASTE can drop it back in place.
   const clipboardRef = useRef<{ canvas: HTMLCanvasElement; x: number; y: number } | null>(null);
   const [clipboardKey, setClipboardKey] = useState(0); // bumps to re-render the COLLER button enabled state
+  // Floating paste — when non-null, the pasted bitmap is shown as a
+  // movable preview on the overlay. It's committed to the frame only
+  // when the user clicks outside, presses Enter / a tool button, or
+  // selects another tool. ESC aborts without committing.
+  const [pasteFloat, setPasteFloat] = useState<{ canvas: HTMLCanvasElement; x: number; y: number } | null>(null);
+  const pasteFloatRef = useRef<{ canvas: HTMLCanvasElement; x: number; y: number } | null>(null);
+  // Mouse-drag state while the user is repositioning the paste float
+  const pasteDragRef = useRef<{ startMouseX: number; startMouseY: number; startFloatX: number; startFloatY: number } | null>(null);
 
   // Animation state
   const [frameCount, setFrameCount] = useState(1);
@@ -1149,6 +1157,25 @@ export default function Editor() {
     const isRight = e.button === 2;
     const color = isRight ? bgColor : fgColor;
     const pos = getCanvasCoords(e);
+
+    // PASTE FLOAT mode: a fresh paste is awaiting placement.
+    // Click inside the float → drag to reposition.
+    // Click outside → commit at current position.
+    const pf = pasteFloatRef.current;
+    if (pf) {
+      const inside =
+        pos.x >= pf.x && pos.x < pf.x + pf.canvas.width &&
+        pos.y >= pf.y && pos.y < pf.y + pf.canvas.height;
+      if (inside) {
+        pasteDragRef.current = { startMouseX: pos.x, startMouseY: pos.y, startFloatX: pf.x, startFloatY: pf.y };
+        drawingRef.current = true;
+        return;
+      } else {
+        commitPasteFloat();
+        // fall through so the click also starts a normal interaction (e.g. new selection)
+      }
+    }
+
     drawingRef.current = true;
     startPosRef.current = pos;
     lastPosRef.current = pos;
@@ -1200,6 +1227,13 @@ export default function Editor() {
     const pos = getCanvasCoords(e);
     setMousePos(pos);
     if (!drawingRef.current) return;
+    // Paste-float drag — update its position
+    if (pasteDragRef.current && pasteFloatRef.current) {
+      const d = pasteDragRef.current;
+      const f = pasteFloatRef.current;
+      setPasteFloat({ canvas: f.canvas, x: d.startFloatX + (pos.x - d.startMouseX), y: d.startFloatY + (pos.y - d.startMouseY) });
+      return;
+    }
     // Move mode takes priority — float follows the cursor on the overlay
     if (movingRef.current) {
       renderFloat(pos.x, pos.y);
@@ -1267,6 +1301,11 @@ export default function Editor() {
     if (!drawingRef.current) return;
     drawingRef.current = false;
     const pos = getCanvasCoords(e);
+    // Paste-float drag: end the drag but keep the float parked (not yet committed)
+    if (pasteDragRef.current) {
+      pasteDragRef.current = null;
+      return;
+    }
     // Move mode wins: commit the float then bail out
     if (movingRef.current) {
       commitMove(pos.x, pos.y);
@@ -1368,6 +1407,16 @@ export default function Editor() {
   useEffect(() => { textSizeRef.current = textSize; }, [textSize]);
   useEffect(() => { selectionRef.current = selection; }, [selection]);
   useEffect(() => { selectModeRef.current = selectMode; }, [selectMode]);
+  useEffect(() => { pasteFloatRef.current = pasteFloat; }, [pasteFloat]);
+
+  // Auto-commit the paste float when the user switches away from the
+  // SÉLECTION tool — keeps the pasted pixels at their current position.
+  useEffect(() => {
+    if (tool !== "select" && pasteFloatRef.current) {
+      commitPasteFloat();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool]);
 
   // Build a Path2D from any selection shape (rect or lasso polygon).
   function selectionPath(sel: Selection): Path2D {
@@ -1382,9 +1431,34 @@ export default function Editor() {
     return p;
   }
 
+  // Paste float renderer — keeps the floating bitmap visible on the
+  // overlay while the user positions it. Re-runs on x/y changes (drag).
+  useEffect(() => {
+    const ov = getOverlayCtx();
+    if (!ov) return;
+    if (!pasteFloat) return;
+    ov.clearRect(0, 0, canvasW, canvasH);
+    ov.save();
+    ov.imageSmoothingEnabled = false;
+    ov.globalAlpha = 0.92;
+    ov.drawImage(pasteFloat.canvas, pasteFloat.x, pasteFloat.y);
+    ov.restore();
+    // Dashed marquee around the float so it's obvious it's not committed
+    ov.save();
+    ov.lineWidth = 1;
+    ov.setLineDash([3, 3]);
+    ov.strokeStyle = "#000";
+    ov.strokeRect(pasteFloat.x + 0.5, pasteFloat.y + 0.5, pasteFloat.canvas.width, pasteFloat.canvas.height);
+    ov.lineDashOffset = 3;
+    ov.strokeStyle = "#FFF";
+    ov.strokeRect(pasteFloat.x + 0.5, pasteFloat.y + 0.5, pasteFloat.canvas.width, pasteFloat.canvas.height);
+    ov.restore();
+  }, [pasteFloat, canvasW, canvasH]);
+
   // Marching-ants animation: redraws the selection outline on the overlay
   // with a stepping dash offset, ~6 fps so it doesn't burn CPU.
   useEffect(() => {
+    if (pasteFloat) return; // paste float owns the overlay
     if (!selection) {
       const ov = getOverlayCtx();
       if (ov) ov.clearRect(0, 0, canvasW, canvasH);
@@ -1409,13 +1483,20 @@ export default function Editor() {
       ov.restore();
     }, 160);
     return () => clearInterval(id);
-  }, [selection, canvasW, canvasH]);
+  }, [selection, canvasW, canvasH, pasteFloat]);
 
   // Keyboard shortcuts for selection + clipboard
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const tgt = e.target as HTMLElement | null;
       if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
+
+      // Paste-float keyboard handling
+      if (pasteFloatRef.current) {
+        if (e.key === "Escape") { cancelPasteFloat(); e.preventDefault(); return; }
+        if (e.key === "Enter")  { commitPasteFloat(); e.preventDefault(); return; }
+      }
+
       const mod = e.metaKey || e.ctrlKey;
       if (mod && (e.key === "c" || e.key === "C")) {
         if (selectionRef.current) { copySelection(); e.preventDefault(); }
@@ -1471,6 +1552,22 @@ export default function Editor() {
       const touch = e.touches[0];
       if (!touch) return;
       const pos = getTouchPos(touch);
+
+      // PASTE FLOAT mode (touch): same logic as mouse
+      const pf = pasteFloatRef.current;
+      if (pf) {
+        const inside =
+          pos.x >= pf.x && pos.x < pf.x + pf.canvas.width &&
+          pos.y >= pf.y && pos.y < pf.y + pf.canvas.height;
+        if (inside) {
+          pasteDragRef.current = { startMouseX: pos.x, startMouseY: pos.y, startFloatX: pf.x, startFloatY: pf.y };
+          drawingRef.current = true;
+          return;
+        } else {
+          commitPasteFloat();
+        }
+      }
+
       drawingRef.current = true;
       startPosRef.current = pos;
       lastPosRef.current = pos;
@@ -1522,6 +1619,12 @@ export default function Editor() {
       const pos = getTouchPos(touch);
       setMousePos(pos);
       lastPosRef.current = pos; // tracked so touchEnd has a final position for move
+      if (pasteDragRef.current && pasteFloatRef.current) {
+        const d = pasteDragRef.current;
+        const f = pasteFloatRef.current;
+        setPasteFloat({ canvas: f.canvas, x: d.startFloatX + (pos.x - d.startMouseX), y: d.startFloatY + (pos.y - d.startMouseY) });
+        return;
+      }
       if (movingRef.current) { renderFloat(pos.x, pos.y); return; }
       const ctx = getCtx();
       const overlay = getOverlayCtx();
@@ -1553,6 +1656,7 @@ export default function Editor() {
       if (!drawingRef.current) return;
       e.preventDefault();
       drawingRef.current = false;
+      if (pasteDragRef.current) { pasteDragRef.current = null; return; }
       if (movingRef.current) {
         const pos = lastPosRef.current ?? startPosRef.current ?? { x: 0, y: 0 };
         commitMove(pos.x, pos.y);
@@ -1755,22 +1859,44 @@ export default function Editor() {
     setClipboardKey(k => k + 1);
   }
 
-  // Paste the clipboard onto the current frame at its original position,
-  // then create a fresh rect selection over the pasted area so the user
-  // can move/erase/copy it again.
+  // Paste: enter floating mode — the clipboard is shown as a movable
+  // preview on the overlay (NOT yet committed). The user repositions it,
+  // then commits by clicking outside / pressing Enter / switching tools.
   function pasteClipboard() {
     const cb = clipboardRef.current;
     if (!cb) return;
+    // If another float was in progress, commit it first
+    if (pasteFloatRef.current) commitPasteFloat();
+    setSelection(null);
+    pasteDragRef.current = null;
+    setPasteFloat({ canvas: cb.canvas, x: cb.x, y: cb.y });
+    setTool("select");
+  }
+
+  function commitPasteFloat() {
+    const f = pasteFloatRef.current;
+    if (!f) return;
     const ctx = getCtx();
-    if (!ctx) return;
+    if (!ctx) { setPasteFloat(null); return; }
     ctx.save();
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(cb.canvas, cb.x, cb.y);
+    ctx.drawImage(f.canvas, f.x, f.y);
     ctx.restore();
     saveLiveCanvas();
     saveCurrentFrame();
-    setSelection({ kind: "rect", x: cb.x, y: cb.y, w: cb.canvas.width, h: cb.canvas.height });
-    setTool("select");
+    pasteFloatRef.current = null;
+    pasteDragRef.current = null;
+    setPasteFloat(null);
+    // Create a fresh selection over the dropped area
+    setSelection({ kind: "rect", x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height });
+  }
+
+  function cancelPasteFloat() {
+    pasteFloatRef.current = null;
+    pasteDragRef.current = null;
+    setPasteFloat(null);
+    const ov = getOverlayCtx();
+    if (ov) ov.clearRect(0, 0, canvasW, canvasH);
   }
 
   // Test whether a canvas-space point falls inside the current selection.
@@ -2115,7 +2241,10 @@ export default function Editor() {
     imageRendering: aliased ? "pixelated" : "auto",
     display: "block",
     cursor:
-      tool === "text" ? "text"
+      pasteFloat && mousePos && mousePos.x >= pasteFloat.x && mousePos.x < pasteFloat.x + pasteFloat.canvas.width
+        && mousePos.y >= pasteFloat.y && mousePos.y < pasteFloat.y + pasteFloat.canvas.height
+        ? "move"
+      : tool === "text" ? "text"
       : tool === "fill" ? "cell"
       : (tool === "select" && selection && mousePos && (
           selection.kind === "rect"
@@ -2349,9 +2478,26 @@ export default function Editor() {
         </div>
       </div>
 
+      {/* PASTE FLOAT — interactive placement bar */}
+      {pasteFloat && (
+        <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ color: t.panelText, fontSize: 14, fontWeight: "bold" }}>COLLAGE FLOTTANT :</div>
+            <div style={{ color: t.panelText, fontSize: 12, opacity: 0.7, fontVariantNumeric: "tabular-nums" }}>
+              {pasteFloat.x},{pasteFloat.y} · {pasteFloat.canvas.width}×{pasteFloat.canvas.height} px
+            </div>
+            <button className="amiga-button" onClick={commitPasteFloat} title="Pose le collage (Enter)" style={{ padding: "2px 10px" }}>POSER</button>
+            <button className="amiga-button" onClick={cancelPasteFloat} title="Annule le collage (ESC)" style={{ padding: "2px 10px" }}>ANNULER</button>
+            <div style={{ color: t.panelText, opacity: 0.55, fontSize: 12, marginLeft: "auto" }}>
+              GLISSE POUR DÉPLACER · ENTER POSE · ESC ANNULE
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* SELECTION CONFIG + ACTIONS — visible when the SÉLECTION tool is
           active OR when there's already a selection on the canvas. */}
-      {(tool === "select" || selection) && (
+      {!pasteFloat && (tool === "select" || selection) && (
         <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <div style={{ color: t.panelText, fontSize: 14, fontWeight: "bold" }}>SÉLECTION :</div>
