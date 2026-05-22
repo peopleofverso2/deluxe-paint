@@ -11,7 +11,8 @@ type Tool =
   | "fill"
   | "eyedropper"
   | "eraser"
-  | "text";
+  | "text"
+  | "select";
 
 // Default canvas dimensions (Amiga preset). The runtime size is held in
 // `canvasW`/`canvasH` state — see RESOLUTIONS below for available presets.
@@ -577,7 +578,7 @@ function downloadBlob(blob: Blob, filename: string) {
 
 type IconName =
   | "pencil" | "line" | "rect" | "rect-fill" | "ellipse" | "ellipse-fill"
-  | "fill" | "eyedropper" | "eraser" | "text"
+  | "fill" | "eyedropper" | "eraser" | "text" | "select"
   | "shape-square" | "shape-round" | "shape-diamond" | "shape-cross"
   | "shape-spray" | "shape-bug" | "shape-insect";
 
@@ -641,6 +642,10 @@ function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
     case "text": return (
       <svg {...common}><path d="M6 5 L18 5 M12 5 L12 19 M9 19 L15 19" strokeWidth={2} /></svg>
     );
+    case "select": return (
+      // Dashed-rect marquee (selection)
+      <svg {...common}><rect x="4" y="6" width="16" height="12" strokeDasharray="2 2" /></svg>
+    );
 
     // ---- brush shapes ----
     case "shape-square": return (
@@ -699,6 +704,7 @@ const TOOLS: { id: Tool; label: string; icon: IconName }[] = [
   { id: "eyedropper",   label: "PIPETTE",    icon: "eyedropper" },
   { id: "eraser",       label: "GOMME",      icon: "eraser" },
   { id: "text",         label: "TEXTE",      icon: "text" },
+  { id: "select",       label: "SÉLECTION",  icon: "select" },
 ];
 
 const BRUSH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128];
@@ -779,6 +785,14 @@ export default function Editor() {
   const [textInput, setTextInput] = useState("TEXTE");
   const [textFontIdx, setTextFontIdx] = useState(0);
   const [textSize, setTextSize] = useState(16);
+
+  // Selection state — a rectangle in canvas coords (or null when nothing
+  // is selected). The selection is drawn onto the overlay canvas as a
+  // dashed marquee that's animated by a tick interval to mimic the
+  // classic "marching ants" effect.
+  const [selection, setSelection] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const selectionRef = useRef<typeof selection>(null);
+  const antsOffsetRef = useRef(0);
 
   // Animation state
   const [frameCount, setFrameCount] = useState(1);
@@ -1149,6 +1163,10 @@ export default function Editor() {
         saveLiveCanvas();
       }
       drawingRef.current = false;
+    } else if (tool === "select") {
+      // Start defining a new selection rect — keep drawingRef true so move
+      // events extend it; mouseUp commits it to state.
+      setSelection(null);
     }
   }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased, textInput, textFontIdx, textSize]);
 
@@ -1178,6 +1196,21 @@ export default function Editor() {
     } else if ((tool === "ellipse" || tool === "ellipse-fill") && overlay && startPosRef.current) {
       overlay.clearRect(0, 0, canvasW, canvasH);
       drawEllipse(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
+    } else if (tool === "select" && overlay && startPosRef.current) {
+      overlay.clearRect(0, 0, canvasW, canvasH);
+      const x0 = Math.min(startPosRef.current.x, pos.x);
+      const y0 = Math.min(startPosRef.current.y, pos.y);
+      const w = Math.abs(pos.x - startPosRef.current.x);
+      const h = Math.abs(pos.y - startPosRef.current.y);
+      overlay.save();
+      overlay.lineWidth = 1;
+      overlay.setLineDash([3, 3]);
+      overlay.strokeStyle = "#000";
+      overlay.strokeRect(x0 + 0.5, y0 + 0.5, w, h);
+      overlay.lineDashOffset = 3;
+      overlay.strokeStyle = "#FFF";
+      overlay.strokeRect(x0 + 0.5, y0 + 0.5, w, h);
+      overlay.restore();
     }
   }, [tool, fgColor, bgColor, brushSize, brushShape, zoom, playing, aliased]);
 
@@ -1201,9 +1234,25 @@ export default function Editor() {
     } else if (tool === "ellipse" || tool === "ellipse-fill") {
       drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
       saveLiveCanvas();
+    } else if (tool === "select") {
+      const x0 = Math.min(startPosRef.current.x, pos.x);
+      const y0 = Math.min(startPosRef.current.y, pos.y);
+      const w = Math.abs(pos.x - startPosRef.current.x);
+      const h = Math.abs(pos.y - startPosRef.current.y);
+      const cx = Math.max(0, Math.min(canvasW, x0));
+      const cy = Math.max(0, Math.min(canvasH, y0));
+      const cw = Math.max(0, Math.min(canvasW - cx, w));
+      const ch = Math.max(0, Math.min(canvasH - cy, h));
+      if (cw >= 2 && ch >= 2) {
+        setSelection({ x: cx, y: cy, w: cw, h: ch });
+      } else {
+        setSelection(null);
+      }
     }
 
-    if (overlay) overlay.clearRect(0, 0, canvasW, canvasH);
+    // The marching-ants effect owns the overlay while a selection exists;
+    // only clear when no selection so we don't wipe the marquee mid-effect.
+    if (overlay && tool !== "select") overlay.clearRect(0, 0, canvasW, canvasH);
     startPosRef.current = null;
     lastPosRef.current = null;
   }, [tool, fgColor, bgColor, brushSize, zoom, aliased]);
@@ -1236,6 +1285,54 @@ export default function Editor() {
   useEffect(() => { textInputRef.current = textInput; }, [textInput]);
   useEffect(() => { textFontIdxRef.current = textFontIdx; }, [textFontIdx]);
   useEffect(() => { textSizeRef.current = textSize; }, [textSize]);
+  useEffect(() => { selectionRef.current = selection; }, [selection]);
+
+  // Marching-ants animation: redraws the selection rectangle on the overlay
+  // with a stepping dash offset, ~6 fps so it doesn't burn CPU.
+  useEffect(() => {
+    if (!selection) {
+      const ov = getOverlayCtx();
+      if (ov) ov.clearRect(0, 0, canvasW, canvasH);
+      return;
+    }
+    const id = setInterval(() => {
+      antsOffsetRef.current = (antsOffsetRef.current + 1) % 8;
+      const ov = getOverlayCtx();
+      if (!ov) return;
+      ov.clearRect(0, 0, canvasW, canvasH);
+      const dash = Math.max(2, Math.round(Math.min(canvasW, canvasH) / 100));
+      ov.save();
+      ov.lineWidth = 1;
+      ov.setLineDash([dash, dash]);
+      ov.lineDashOffset = -antsOffsetRef.current;
+      ov.strokeStyle = "#000000";
+      ov.strokeRect(selection.x + 0.5, selection.y + 0.5, selection.w, selection.h);
+      ov.lineDashOffset = -antsOffsetRef.current + dash;
+      ov.strokeStyle = "#FFFFFF";
+      ov.strokeRect(selection.x + 0.5, selection.y + 0.5, selection.w, selection.h);
+      ov.restore();
+    }, 160);
+    return () => clearInterval(id);
+  }, [selection, canvasW, canvasH]);
+
+  // Keyboard shortcuts for selection (ESC clears, Backspace/Delete erases)
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
+      if (!selectionRef.current) return;
+      if (e.key === "Escape") {
+        setSelection(null);
+        e.preventDefault();
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        eraseSelection();
+        e.preventDefault();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1378,6 +1475,53 @@ export default function Editor() {
     setCurrentFrame(0);
     const ctx = getCtx();
     if (ctx) { clearCanvas(ctx); saveLiveCanvas(); }
+  }
+
+  // -------------------- Selection actions --------------------
+
+  // Fill the selection rect with bgColor on the current frame.
+  function eraseSelection() {
+    const sel = selectionRef.current;
+    if (!sel) return;
+    const ctx = getCtx();
+    if (!ctx) return;
+    ctx.save();
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(sel.x, sel.y, sel.w, sel.h);
+    ctx.restore();
+    saveLiveCanvas();
+    saveCurrentFrame();
+  }
+
+  // Crop every frame to the selection. Adjusts the canvas dimensions too.
+  function cropToSelection() {
+    const sel = selectionRef.current;
+    if (!sel) return;
+    if (sel.w < 1 || sel.h < 1) return;
+    stopPlayback();
+    // Persist any unsaved live edits before slicing
+    const ctx = getCtx();
+    if (ctx) framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
+    const tmp = document.createElement("canvas");
+    tmp.width = canvasW;
+    tmp.height = canvasH;
+    const tctx = tmp.getContext("2d")!;
+    framesDataRef.current = framesDataRef.current.map(img => {
+      if (!img) return null;
+      tctx.putImageData(img, 0, 0);
+      const out = document.createElement("canvas");
+      out.width = sel.w;
+      out.height = sel.h;
+      const octx = out.getContext("2d")!;
+      octx.drawImage(tmp, sel.x, sel.y, sel.w, sel.h, 0, 0, sel.w, sel.h);
+      return octx.getImageData(0, 0, sel.w, sel.h);
+    });
+    liveDataRef.current = framesDataRef.current[currentFrameRef.current] ?? null;
+    setCanvasW(sel.w);
+    setCanvasH(sel.h);
+    canvasWRef.current = sel.w;
+    canvasHRef.current = sel.h;
+    setSelection(null);
   }
 
   // Nearest-neighbor rescale via an offscreen canvas (imageSmoothingEnabled off).
@@ -1635,7 +1779,7 @@ export default function Editor() {
     height: canvasH * zoom,
     imageRendering: aliased ? "pixelated" : "auto",
     display: "block",
-    cursor: tool === "text" ? "text" : tool === "fill" ? "cell" : "crosshair",
+    cursor: tool === "text" ? "text" : tool === "fill" ? "cell" : tool === "select" ? "crosshair" : "crosshair",
   };
 
   return (
@@ -1859,6 +2003,45 @@ export default function Editor() {
           </div>
         </div>
       </div>
+
+      {/* SELECTION ACTIONS (visible when a selection rect exists) */}
+      {selection && (
+        <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ color: t.panelText, fontSize: 14, fontWeight: "bold" }}>SÉLECTION :</div>
+            <div style={{ color: t.panelText, fontSize: 12, opacity: 0.7, fontVariantNumeric: "tabular-nums" }}>
+              {selection.x},{selection.y} · {selection.w}×{selection.h} px
+            </div>
+            <button
+              className="amiga-button"
+              onClick={cropToSelection}
+              title="Recadre le canvas (et toutes les frames) à la sélection"
+              style={{ padding: "2px 10px" }}
+            >
+              ✂ DÉTOURER
+            </button>
+            <button
+              className="amiga-button"
+              onClick={eraseSelection}
+              title="Efface le contenu de la sélection (couleur de fond)"
+              style={{ padding: "2px 10px" }}
+            >
+              EFFACER
+            </button>
+            <button
+              className="amiga-button"
+              onClick={() => setSelection(null)}
+              title="Annule la sélection (ESC)"
+              style={{ padding: "2px 10px" }}
+            >
+              ANNULER
+            </button>
+            <div style={{ color: t.panelText, opacity: 0.55, fontSize: 12, marginLeft: "auto" }}>
+              DEL POUR EFFACER · ESC POUR ANNULER
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TEXT-TOOL CONFIG (visible only when text tool is active) */}
       {tool === "text" && (
