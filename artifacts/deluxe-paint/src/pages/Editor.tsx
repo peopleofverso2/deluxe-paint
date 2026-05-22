@@ -2401,8 +2401,27 @@ export default function Editor() {
             >COLLER</button>
             {selection && (
               <>
-                <button className="amiga-button" onClick={detourSelection} title="Isole la forme : remplit le reste de la frame avec la couleur de fond (canvas inchangé)" style={{ padding: "2px 10px" }}>⌖ DÉTOURER</button>
-                <button className="amiga-button" onClick={cropFrameToSelection} title="Recadre le canvas et toutes les frames à la sélection (change la taille du projet)" style={{ padding: "2px 10px" }}>✂ RECADRER</button>
+                <button
+                  className="amiga-button"
+                  onClick={detourSelection}
+                  title="Détoure : isole la forme, le reste devient la couleur de fond (canvas inchangé)"
+                  style={{ padding: "2px 10px", display: "inline-flex", alignItems: "center", gap: 6 }}
+                >
+                  <span aria-hidden style={{ fontSize: 14, lineHeight: 1 }}>✂</span>
+                  DÉTOURER
+                </button>
+                <button
+                  className="amiga-button"
+                  onClick={cropFrameToSelection}
+                  title="Recadre le canvas et toutes les frames à la sélection (change la taille du projet)"
+                  style={{ padding: "2px 10px", display: "inline-flex", alignItems: "center", gap: 6 }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="square" aria-hidden>
+                    {/* Crop marks: # shape with 4 right-angle brackets */}
+                    <path d="M3 9 L21 9 M3 15 L21 15 M9 3 L9 21 M15 3 L15 21" />
+                  </svg>
+                  RECADRER
+                </button>
                 <button className="amiga-button" onClick={eraseSelection} title="Efface le contenu (couleur de fond)" style={{ padding: "2px 10px" }}>EFFACER</button>
                 <button className="amiga-button" onClick={() => setSelection(null)} title="Annule la sélection (ESC)" style={{ padding: "2px 10px" }}>ANNULER</button>
               </>
