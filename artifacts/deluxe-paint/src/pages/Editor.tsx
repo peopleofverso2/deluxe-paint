@@ -1684,7 +1684,7 @@ export default function Editor() {
             </button>
           ))}
           <div style={{ marginTop: 8, borderTop: `1px solid ${t.border}`, paddingTop: 4 }}>
-            <div style={{ color: "#000", fontSize: 10, textAlign: "center", marginBottom: 2 }}>TAILLE</div>
+            <div style={{ color: t.panelText, fontSize: 10, textAlign: "center", marginBottom: 2 }}>TAILLE</div>
             <input
               type="number"
               min={BRUSH_SIZE_MIN}
@@ -1701,7 +1701,7 @@ export default function Editor() {
                 width: "100%",
                 boxSizing: "border-box",
                 background: "#FFF",
-                color: "#000",
+                color: t.panelText,
                 border: `1px solid ${t.border}`,
                 padding: "2px 2px",
                 fontFamily: "'VT323', monospace",
@@ -1720,13 +1720,13 @@ export default function Editor() {
                 style={{ width: "100%", height: 22, marginBottom: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: 0 }}
               >
                 <div style={{ width: Math.min(s, 12) + 2, height: Math.min(s, 12) + 2, background: "#000", flexShrink: 0 }} />
-                <span style={{ fontSize: 11, color: "#000", lineHeight: 1, fontFamily: "'VT323', monospace" }}>{s}</span>
+                <span style={{ fontSize: 11, color: t.panelText, lineHeight: 1, fontFamily: "'VT323', monospace" }}>{s}</span>
               </button>
             ))}
           </div>
           {/* Brush shape (applies to the pencil) */}
           <div style={{ marginTop: 8, borderTop: `1px solid ${t.border}`, paddingTop: 4 }}>
-            <div style={{ color: "#000", fontSize: 10, textAlign: "center", marginBottom: 2 }}>FORME</div>
+            <div style={{ color: t.panelText, fontSize: 10, textAlign: "center", marginBottom: 2 }}>FORME</div>
             {BRUSH_SHAPES.map(s => (
               <button
                 key={s.id}
@@ -1791,7 +1791,7 @@ export default function Editor() {
       {tool === "text" && (
         <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <div style={{ color: "#000", fontSize: 14 }}>TEXTE (TAMPON) :</div>
+            <div style={{ color: t.panelText, fontSize: 14 }}>TEXTE (TAMPON) :</div>
             <input
               type="text"
               value={textInput}
@@ -1799,7 +1799,7 @@ export default function Editor() {
               placeholder="Tape ton texte puis clique"
               style={{
                 background: "#FFF",
-                color: "#000",
+                color: t.panelText,
                 border: `1px solid ${t.border}`,
                 padding: "2px 6px",
                 fontFamily: TEXT_FONTS[textFontIdx].family,
@@ -1809,14 +1809,14 @@ export default function Editor() {
               }}
             />
             <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <span style={{ color: "#000", fontSize: 14 }}>POLICE :</span>
+              <span style={{ color: t.panelText, fontSize: 14 }}>POLICE :</span>
               {TEXT_FONTS.map((f, i) => (
                 <button
                   key={f.label}
                   className="amiga-button"
                   data-active={textFontIdx === i}
                   onClick={() => setTextFontIdx(i)}
-                  style={{ padding: "2px 8px", color: "#000", fontFamily: f.family }}
+                  style={{ padding: "2px 8px", color: t.panelText, fontFamily: f.family }}
                   title={f.label}
                 >
                   {f.label}
@@ -1824,7 +1824,7 @@ export default function Editor() {
               ))}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
-              <span style={{ color: "#000", fontSize: 14 }}>TAILLE :</span>
+              <span style={{ color: t.panelText, fontSize: 14 }}>TAILLE :</span>
               <input
                 type="number"
                 min={TEXT_SIZE_MIN}
@@ -1838,7 +1838,7 @@ export default function Editor() {
                 }}
                 style={{
                   background: "#FFF",
-                  color: "#000",
+                  color: t.panelText,
                   border: `1px solid ${t.border}`,
                   padding: "2px 4px",
                   fontFamily: "'VT323', monospace",
@@ -1847,20 +1847,20 @@ export default function Editor() {
                 }}
                 title={`Taille libre (${TEXT_SIZE_MIN}–${TEXT_SIZE_MAX} px)`}
               />
-              <span style={{ color: "#000", fontSize: 12 }}>px</span>
+              <span style={{ color: t.panelText, fontSize: 12 }}>px</span>
               {TEXT_SIZES.map(s => (
                 <button
                   key={s}
                   className="amiga-button"
                   data-active={textSize === s}
                   onClick={() => setTextSize(s)}
-                  style={{ padding: "2px 6px", color: "#000", minWidth: 32 }}
+                  style={{ padding: "2px 6px", color: t.panelText, minWidth: 32 }}
                 >
                   {s}
                 </button>
               ))}
             </div>
-            <div style={{ color: "#555", fontSize: 12, marginLeft: "auto" }}>
+            <div style={{ color: t.panelText, opacity: 0.55, fontSize: 12, marginLeft: "auto" }}>
               {TEXT_FONTS[textFontIdx].pixel ? "PIXEL · " : "HD · "}
               CLIC SUR LE CANVAS POUR TAMPONNER
             </div>
@@ -1872,13 +1872,13 @@ export default function Editor() {
           if REC is on, this scratching is baked into the recorded video. */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ color: "#000", fontSize: 14, fontWeight: "bold", minWidth: 70 }}>SCRATCH :</span>
+          <span style={{ color: t.panelText, fontSize: 14, fontWeight: "bold", minWidth: 70 }}>SCRATCH :</span>
           <button
             className="amiga-button"
             onClick={() => setPlayDir(playDir === 1 ? -1 : 1)}
             data-active={playDir === -1}
             title="SENS DE LECTURE — INVERSER"
-            style={{ padding: "2px 8px", color: "#000", minWidth: 56 }}
+            style={{ padding: "2px 8px", color: t.panelText, minWidth: 56 }}
           >
             {playDir === -1 ? "◀◀ REV" : "▶▶ FWD"}
           </button>
@@ -1889,7 +1889,7 @@ export default function Editor() {
               onClick={() => setPlaySpeed(s)}
               data-active={playSpeed === s}
               title={`VITESSE ×${s}`}
-              style={{ padding: "2px 6px", color: "#000", minWidth: 28 }}
+              style={{ padding: "2px 6px", color: t.panelText, minWidth: 28 }}
             >
               {s}×
             </button>
@@ -1907,7 +1907,7 @@ export default function Editor() {
             title="GLISSE POUR SCRATCHER L'ANIMATION (CAPTURÉ PAR REC)"
             disabled={frameCount < 2}
           />
-          <span style={{ color: "#000", fontSize: 12, minWidth: 80, fontVariantNumeric: "tabular-nums" }}>
+          <span style={{ color: t.panelText, fontSize: 12, minWidth: 80, fontVariantNumeric: "tabular-nums" }}>
             {String(currentFrame + 1).padStart(3, "0")} / {String(frameCount).padStart(3, "0")}
           </span>
         </div>
@@ -1953,14 +1953,14 @@ export default function Editor() {
             className="amiga-button"
             data-active={looping}
             onClick={() => { const v = !looping; setLooping(v); loopingRef.current = v; }}
-            style={{ padding: "2px 8px", color: looping ? "#00FF00" : "#000" }}
+            style={{ padding: "2px 8px", color: looping ? "#00CC44" : t.panelText }}
             title="BOUCLE"
           >
             {looping ? "BOUCLE ON" : "BOUCLE OFF"}
           </button>
 
           {/* FPS */}
-          <div style={{ display: "flex", alignItems: "center", gap: 4, color: "#000", fontSize: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 4, color: t.panelText, fontSize: 14 }}>
             <span>VIT:</span>
             <input
               type="range" min={1} max={24} value={fps}
@@ -1971,7 +1971,7 @@ export default function Editor() {
           </div>
 
           {/* Frame counter */}
-          <div style={{ color: "#000", minWidth: 70, fontSize: 14 }}>
+          <div style={{ color: t.panelText, minWidth: 70, fontSize: 14 }}>
             IMG {currentFrame + 1}/{frameCount}
           </div>
 
@@ -2038,9 +2038,9 @@ export default function Editor() {
 
           {/* FG/BG color display */}
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <div style={{ fontSize: 11, color: "#000" }}>AVANT</div>
+            <div style={{ fontSize: 11, color: t.panelText }}>AVANT</div>
             <div style={{ width: 32, height: 16, background: fgColor, border: `1px solid ${t.border}` }} />
-            <div style={{ fontSize: 11, color: "#000" }}>FOND</div>
+            <div style={{ fontSize: 11, color: t.panelText }}>FOND</div>
             <div style={{ width: 32, height: 16, background: bgColor, border: `1px solid ${t.border}` }} />
           </div>
         </div>
@@ -2090,7 +2090,7 @@ function FrameThumb({ index, current, frameData, onClick }: {
           display: "block",
         }}
       />
-      <div style={{ fontSize: 11, color: "#000" }}>{index + 1}</div>
+      <div style={{ fontSize: 11, color: "currentColor" }}>{index + 1}</div>
     </div>
   );
 }
@@ -2125,7 +2125,7 @@ function MenuDropdown({ label, items }: { label: string; items: { label: string;
               key={item.label}
               className="amiga-button"
               onClick={() => { item.action(); setOpen(false); }}
-              style={{ display: "block", width: "100%", textAlign: "left", padding: "4px 8px", color: "#000" }}
+              style={{ display: "block", width: "100%", textAlign: "left", padding: "4px 8px", color: "currentColor" }}
             >
               {item.label}
             </button>
