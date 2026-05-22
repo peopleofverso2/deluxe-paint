@@ -2587,14 +2587,14 @@ export default function Editor() {
           onClick={undo}
           disabled={!canUndo}
           title="Annuler (⌘Z)"
-          style={{ padding: "2px 8px", height: 24, marginLeft: 4, opacity: canUndo ? 1 : 0.4 }}
+          style={{ padding: "2px 10px", height: 24, minWidth: 36, marginLeft: 4, opacity: canUndo ? 1 : 0.4 }}
         >↶</button>
         <button
           className="amiga-button"
           onClick={redo}
           disabled={!canRedo}
           title="Rétablir (⌘⇧Z / ⌘Y)"
-          style={{ padding: "2px 8px", height: 24, opacity: canRedo ? 1 : 0.4 }}
+          style={{ padding: "2px 10px", height: 24, minWidth: 36, opacity: canRedo ? 1 : 0.4 }}
         >↷</button>
         <MenuDropdown label="RÉSO" items={RESOLUTIONS.map(r => ({
           label: `${r.label} ${r.w}×${r.h}${r.w === canvasW && r.h === canvasH ? " ✓" : ""}`,

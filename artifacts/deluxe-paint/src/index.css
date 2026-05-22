@@ -106,19 +106,18 @@
   background-color: hsl(var(--panel-border-light) / 0.6);
 }
 
-/* Active button: panel bg + primary text + thick primary border.
-   Using a border (instead of filled primary bg) avoids the case where
-   the active button's bg matches an ancestor's bg (e.g. menubar in light
-   mode also uses #191919 — a filled active button blends in invisibly).
-   The thick border + colored text + box-shadow ring keeps active state
-   readable regardless of where the button sits.
-   :not([data-active]) keeps the transient press feedback. */
+/* Active button — same box dimensions as inactive (keeps the menubar
+   layout from shifting). We only change colors + add an inset shadow
+   that visually doubles the border without occupying layout space. */
 .amiga-button[data-active="true"] {
   background-color: hsl(var(--panel)) !important;
   color: hsl(var(--primary)) !important;
-  border: 2px solid hsl(var(--primary)) !important;
-  box-shadow: inset 0 0 0 1px hsl(var(--panel)), 0 0 0 1px hsl(var(--primary));
-  font-weight: 700;
+  border-top:    1px solid hsl(var(--primary)) !important;
+  border-left:   1px solid hsl(var(--primary)) !important;
+  border-right:  1px solid hsl(var(--primary)) !important;
+  border-bottom: 1px solid hsl(var(--primary)) !important;
+  box-shadow: inset 0 0 0 1px hsl(var(--primary));
+  /* DON'T change font-weight — it widens the glyphs and shifts neighbors. */
 }
 
 .amiga-button:active:not([data-active="true"]) {
