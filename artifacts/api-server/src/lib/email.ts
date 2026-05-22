@@ -49,7 +49,11 @@ export async function sendMagicLink(email: string, link: string): Promise<void> 
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    logger.error({ status: res.status, text }, "Brevo send failed");
-    throw new Error("Brevo send failed: " + res.status);
+    logger.error({ status: res.status, text }, "Brevo send failed — falling back to console log");
+    // Fallback: even when Brevo refuses, surface the link so the user
+    // can still self-recover from Cloud Run logs.
+    // eslint-disable-next-line no-console
+    console.log("\n=== MAGIC LINK (Brevo failed) ===\nFor:  " + email + "\nLink: " + link + "\n=================================\n");
+    return;
   }
 }
