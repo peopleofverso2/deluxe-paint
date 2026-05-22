@@ -17,8 +17,7 @@
 }
 
 :root {
-  /* People of Verso — minimal black on cream. The "chrome" (menubar,
-     panels, status bar) is brand-styled; the canvas stays raw pixel-art. */
+  /* LIGHT theme — People of Verso minimal black on cream. */
   --background: 36 14% 93%;  /* #F0EFED — cream brand bg */
   --foreground: 0 0% 0%;
 
@@ -32,6 +31,32 @@
 
   --app-font-mono: 'VT323', monospace;
   --radius: 0px;
+}
+
+/* NIGHT theme — dark with red accent. Applied when the editor root
+   has data-theme="night". */
+[data-theme="night"] {
+  --background: 0 0% 4%;        /* #0A0A0A */
+  --foreground: 36 14% 93%;     /* cream text on dark */
+
+  --panel: 0 0% 10%;            /* #1A1A1A */
+  --panel-text: 36 14% 93%;     /* cream */
+  --panel-border-light: 0 80% 56%;  /* red highlight edge */
+  --panel-border-dark: 0 80% 36%;   /* darker red shadow edge */
+
+  --primary: 0 100% 56%;        /* #FF3030 red accent */
+  --primary-foreground: 0 0% 0%;
+}
+
+[data-theme="night"] body { background: #0A0A0A; color: #F0EFED; }
+[data-theme="night"] input[type="number"],
+[data-theme="night"] input[type="text"] {
+  background: #1A1A1A !important;
+  color: #F0EFED !important;
+  border-color: #FF3030 !important;
+}
+[data-theme="night"] input[type="range"] {
+  accent-color: #FF3030;
 }
 
 @layer base {

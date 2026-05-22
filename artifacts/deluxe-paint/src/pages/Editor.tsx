@@ -37,6 +37,88 @@ const AMIGA_PALETTE = [
   "#FF4422","#44FF00","#0055FF","#FF0055",
 ];
 
+// Commodore 64 — 16 colors, the historical canonical palette (PAL)
+const C64_PALETTE = [
+  "#000000","#FFFFFF","#880000","#AAFFEE",
+  "#CC44CC","#00CC55","#0000AA","#EEEE77",
+  "#DD8855","#664400","#FF7777","#333333",
+  "#777777","#AAFF66","#0088FF","#BBBBBB",
+];
+
+// Original Game Boy DMG — 4 greens
+const GAMEBOY_PALETTE = [
+  "#0F380F","#306230","#8BAC0F","#9BBC0F",
+];
+
+// PICO-8 fantasy console — 16 carefully picked colors
+const PICO8_PALETTE = [
+  "#000000","#1D2B53","#7E2553","#008751",
+  "#AB5236","#5F574F","#C2C3C7","#FFF1E8",
+  "#FF004D","#FFA300","#FFEC27","#00E436",
+  "#29ADFF","#83769C","#FF77A8","#FFCCAA",
+];
+
+// Pastel — soft modern set, useful for non-retro work
+const PASTEL_PALETTE = [
+  "#FFFFFF","#F8E1E7","#FCD5CE","#FFD6A5",
+  "#FDFFB6","#CAFFBF","#9BF6FF","#A0C4FF",
+  "#BDB2FF","#FFC6FF","#E0E0E0","#B5BFC9",
+  "#737373","#3D3D3D","#000000","#5C2A5E",
+];
+
+// Neon — saturated club / cyberpunk
+const NEON_PALETTE = [
+  "#000000","#0A0033","#1B0050","#290080",
+  "#FF00C8","#FF006E","#FF2D00","#FF7A00",
+  "#FFE700","#A1FF00","#00FF85","#00FFEA",
+  "#00B7FF","#3A00FF","#FFFFFF","#C0C0C0",
+];
+
+// ---- THEME ----
+type ThemeId = "light" | "night";
+type ThemeColors = {
+  bg: string;
+  panel: string;
+  panelText: string;
+  menubar: string;
+  menubarText: string;
+  canvasBg: string;
+  accent: string;
+  border: string;
+};
+const THEMES: Record<ThemeId, ThemeColors> = {
+  light: {
+    bg: "#F0EFED",
+    panel: "#FFFFFF",
+    panelText: "#000000",
+    menubar: "#191919",
+    menubarText: "#F0EFED",
+    canvasBg: "#191919",
+    accent: "#000000",
+    border: "#000000",
+  },
+  night: {
+    bg: "#0A0A0A",
+    panel: "#1A1A1A",
+    panelText: "#F0EFED",
+    menubar: "#FF1F1F",
+    menubarText: "#FFFFFF",
+    canvasBg: "#000000",
+    accent: "#FF3030",
+    border: "#FF3030",
+  },
+};
+
+const PALETTES = [
+  { id: "amiga",   label: "AMIGA",    colors: AMIGA_PALETTE,   width: 8 },
+  { id: "c64",     label: "C64",      colors: C64_PALETTE,     width: 8 },
+  { id: "pico8",   label: "PICO-8",   colors: PICO8_PALETTE,   width: 8 },
+  { id: "gameboy", label: "GAME BOY", colors: GAMEBOY_PALETTE, width: 4 },
+  { id: "pastel",  label: "PASTEL",   colors: PASTEL_PALETTE,  width: 8 },
+  { id: "neon",    label: "NEON",     colors: NEON_PALETTE,    width: 8 },
+] as const;
+type PaletteId = (typeof PALETTES)[number]["id"];
+
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return m ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) } : null;
@@ -548,7 +630,13 @@ export default function Editor() {
   const [zoom, setZoom] = useState(() => window.innerWidth <= 640 ? 1 : 2);
   const [fit, setFit] = useState(true);
   const [aliased, setAliased] = useState(true);
+  const [paletteId, setPaletteId] = useState<PaletteId>("amiga");
+  const [theme, setTheme] = useState<"light" | "night">("light");
+  const [splashOpen, setSplashOpen] = useState(true);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+
+  const activePalette = PALETTES.find(p => p.id === paletteId) ?? PALETTES[0];
+  const t = THEMES[theme];
 
   // Text-tool state (tampon / stamp mode)
   const [textInput, setTextInput] = useState("TEXTE");
@@ -1371,10 +1459,13 @@ export default function Editor() {
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden", background: "#F0EFED", fontFamily: "'VT323', monospace", fontSize: 16, color: "#000" }}>
+    <div data-theme={theme} style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden", background: t.bg, color: t.panelText, fontFamily: "'VT323', monospace", fontSize: 16 }}>
+
+      {/* SPLASH */}
+      {splashOpen && <SplashScreen theme={t} onDismiss={() => setSplashOpen(false)} />}
 
       {/* MENUBAR */}
-      <div style={{ display: "flex", alignItems: "center", background: "#191919", borderBottom: "2px solid #000", padding: "0 4px", flexShrink: 0, height: 28 }}>
+      <div style={{ display: "flex", alignItems: "center", background: t.menubar, borderBottom: `2px solid ${t.border}`, padding: "0 4px", flexShrink: 0, height: 28 }}>
         <MenuDropdown label="IMAGE" items={(() => {
           const animOk = canvasW <= ANIM_EXPORT_MAX_W;
           const animSuffix = animOk ? "" : ` — désactivé en ${canvasW}×${canvasH}`;
@@ -1442,7 +1533,20 @@ export default function Editor() {
         >
           {aliased ? "ALIAS ON" : "ALIAS OFF"}
         </button>
-        <div style={{ marginLeft: "auto", color: "#F0EFED", fontSize: 14, paddingRight: 8, letterSpacing: 1 }}>
+        <MenuDropdown label="PALETTE" items={PALETTES.map(p => ({
+          label: `${p.label} (${p.colors.length})${p.id === paletteId ? " ✓" : ""}`,
+          action: () => setPaletteId(p.id),
+        }))} />
+        <button
+          className="amiga-button"
+          onClick={() => setTheme(theme === "light" ? "night" : "light")}
+          data-active={theme === "night"}
+          title="THÈME — JOUR / NUIT"
+          style={{ padding: "2px 10px", height: 24, color: t.panelText, marginLeft: 4 }}
+        >
+          {theme === "night" ? "☾ NUIT" : "☀ JOUR"}
+        </button>
+        <div style={{ marginLeft: "auto", color: t.menubarText, fontSize: 14, paddingRight: 8, letterSpacing: 1 }}>
           DELUXE PAINT · PEOPLE OF VERSO
         </div>
       </div>
@@ -1545,7 +1649,7 @@ export default function Editor() {
         </div>
 
         {/* CANVAS AREA */}
-        <div ref={canvasAreaRef} style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", background: "#191919", position: "relative" }}>
+        <div ref={canvasAreaRef} style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", background: t.canvasBg, position: "relative" }}>
           <div style={{ position: "relative", margin: 16, display: "inline-block" }}>
             <canvas
               ref={canvasRef}
@@ -1777,30 +1881,41 @@ export default function Editor() {
       </div>
 
       {/* PALETTE + STATUS */}
-      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: "2px solid #FFF", padding: "4px 8px" }}>
+      <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `2px solid ${t.border}`, padding: "4px 8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {/* Palette */}
-          <div style={{ display: "flex", flexWrap: "wrap", width: 272, gap: 2 }}>
-            {AMIGA_PALETTE.map((color) => (
-              <div
-                key={color}
-                style={{
-                  width: 14,
-                  height: 14,
-                  background: color,
-                  border: fgColor === color ? "2px solid #FFF" : bgColor === color ? "2px solid #FF8800" : "1px solid #000",
-                  cursor: "pointer",
-                  boxSizing: "border-box",
-                }}
-                title={color}
-                onClick={() => setFgColor(color)}
-                onContextMenu={e => { e.preventDefault(); setBgColor(color); }}
-              />
-            ))}
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <div style={{ fontSize: 10, color: t.panelText, opacity: 0.7 }}>
+              {activePalette.label} · {activePalette.colors.length} couleurs
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: `repeat(${activePalette.width}, 16px)`,
+                gap: 2,
+              }}
+            >
+              {activePalette.colors.map((color, i) => (
+                <div
+                  key={`${activePalette.id}-${i}-${color}`}
+                  style={{
+                    width: 16,
+                    height: 16,
+                    background: color,
+                    border: fgColor === color ? `2px solid ${t.accent}` : bgColor === color ? "2px dashed " + t.accent : `1px solid ${t.border}`,
+                    cursor: "pointer",
+                    boxSizing: "border-box",
+                  }}
+                  title={color}
+                  onClick={() => setFgColor(color)}
+                  onContextMenu={e => { e.preventDefault(); setBgColor(color); }}
+                />
+              ))}
+            </div>
           </div>
 
           {/* Status bar */}
-          <div style={{ flex: 1, color: "#000", fontSize: 14, paddingLeft: 8 }}>
+          <div style={{ flex: 1, color: t.panelText, fontSize: 14, paddingLeft: 8 }}>
             <div>OUTIL: {TOOLS.find(t => t.id === tool)?.label ?? tool.toUpperCase()}</div>
             <div>POS: {mousePos ? `${mousePos.x},${mousePos.y}` : "--,--"}</div>
             <div>ZOOM: x{zoom < 1 ? zoom.toFixed(2) : zoom}{fit ? " (FIT)" : ""}</div>
@@ -1902,6 +2017,94 @@ function MenuDropdown({ label, items }: { label: string; items: { label: string;
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Splash screen — full-screen overlay shown on app load, click/key dismisses.
+// Auto-hides after 2.5s if untouched.
+function SplashScreen({ theme: t, onDismiss }: { theme: ThemeColors; onDismiss: () => void }) {
+  useEffect(() => {
+    const onKey = () => onDismiss();
+    window.addEventListener("keydown", onKey, { once: true });
+    const timer = setTimeout(onDismiss, 2500);
+    return () => { window.removeEventListener("keydown", onKey); clearTimeout(timer); };
+  }, [onDismiss]);
+
+  return (
+    <div
+      onClick={onDismiss}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 9999,
+        background: t.menubar,
+        color: t.menubarText,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: "pointer",
+        fontFamily: "'VT323', monospace",
+        userSelect: "none",
+        animation: "splashFade 2.5s ease-in forwards",
+      }}
+    >
+      <style>{`
+        @keyframes splashFade {
+          0%, 75%   { opacity: 1; }
+          100%      { opacity: 0; pointer-events: none; }
+        }
+        @keyframes splashPulse {
+          0%, 100% { transform: scale(1); }
+          50%      { transform: scale(1.03); }
+        }
+        @keyframes splashSlide {
+          from { transform: translateY(20px); opacity: 0; }
+          to   { transform: translateY(0);    opacity: 1; }
+        }
+      `}</style>
+
+      <div style={{
+        fontSize: "min(14vw, 140px)",
+        letterSpacing: "0.05em",
+        lineHeight: 1,
+        animation: "splashPulse 1.4s ease-in-out infinite",
+      }}>
+        DELUXE PAINT
+      </div>
+
+      <div style={{
+        marginTop: 24,
+        fontSize: "min(3.5vw, 32px)",
+        letterSpacing: "0.4em",
+        opacity: 0.9,
+        animation: "splashSlide 0.6s ease-out 0.2s both",
+      }}>
+        PEOPLE · OF · VERSO
+      </div>
+
+      {/* Small Amiga-style palette strip for character */}
+      <div style={{
+        marginTop: 48,
+        display: "flex",
+        gap: 0,
+        animation: "splashSlide 0.6s ease-out 0.4s both",
+      }}>
+        {["#FF1F1F", "#FF8800", "#FFEE00", "#44FF44", "#00CCCC", "#5588FF", "#AA44FF", "#FFFFFF"].map(c => (
+          <div key={c} style={{ width: 24, height: 8, background: c }} />
+        ))}
+      </div>
+
+      <div style={{
+        position: "absolute",
+        bottom: 32,
+        fontSize: 14,
+        letterSpacing: "0.2em",
+        opacity: 0.6,
+      }}>
+        CLIQUE POUR ENTRER
+      </div>
     </div>
   );
 }
