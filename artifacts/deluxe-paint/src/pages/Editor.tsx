@@ -12,7 +12,8 @@ type Tool =
   | "eyedropper"
   | "eraser"
   | "text"
-  | "select";
+  | "select"
+  | "stamp";
 
 // Default canvas dimensions (Amiga preset). The runtime size is held in
 // `canvasW`/`canvasH` state — see RESOLUTIONS below for available presets.
@@ -614,7 +615,7 @@ function downloadBlob(blob: Blob, filename: string) {
 
 type IconName =
   | "pencil" | "line" | "rect" | "rect-fill" | "ellipse" | "ellipse-fill"
-  | "fill" | "eyedropper" | "eraser" | "text" | "select"
+  | "fill" | "eyedropper" | "eraser" | "text" | "select" | "stamp"
   | "shape-square" | "shape-round" | "shape-diamond" | "shape-cross"
   | "shape-spray" | "shape-bug" | "shape-insect";
 
@@ -682,6 +683,14 @@ function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
       // Dashed-rect marquee (selection)
       <svg {...common}><rect x="4" y="6" width="16" height="12" strokeDasharray="2 2" /></svg>
     );
+    case "stamp": return (
+      // Rubber stamp: round head + handle + base line
+      <svg {...common}>
+        <circle cx="12" cy="6" r="3" fill="currentColor" stroke="none" />
+        <path d="M9 9 L8 16 L16 16 L15 9 Z" />
+        <path d="M5 20 L19 20" strokeWidth={2} />
+      </svg>
+    );
 
     // ---- brush shapes ----
     case "shape-square": return (
@@ -741,6 +750,7 @@ const TOOLS: { id: Tool; label: string; icon: IconName }[] = [
   { id: "eraser",       label: "GOMME",      icon: "eraser" },
   { id: "text",         label: "TEXTE",      icon: "text" },
   { id: "select",       label: "SÉLECTION",  icon: "select" },
+  { id: "stamp",        label: "TAMPON",     icon: "stamp" },
 ];
 
 const BRUSH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128];
@@ -857,6 +867,13 @@ export default function Editor() {
   const pasteFloatRef = useRef<{ canvas: HTMLCanvasElement; x: number; y: number } | null>(null);
   // Mouse-drag state while the user is repositioning the paste float
   const pasteDragRef = useRef<{ startMouseX: number; startMouseY: number; startFloatX: number; startFloatY: number } | null>(null);
+  // TAMPON tool — uses the clipboard as a stamp. Scale lets the user
+  // re-size before stamping; lastStampPos lets drag-stamp space marks
+  // out so they don't overlap on rapid mouse moves.
+  const [stampScale, setStampScale] = useState(1);
+  const stampScaleRef = useRef(1);
+  useEffect(() => { stampScaleRef.current = stampScale; }, [stampScale]);
+  const lastStampPosRef = useRef<{ x: number; y: number } | null>(null);
 
   // Animation state
   const [frameCount, setFrameCount] = useState(1);
@@ -1389,6 +1406,16 @@ export default function Editor() {
         saveLiveCanvas();
       }
       drawingRef.current = false;
+    } else if (tool === "stamp") {
+      if (!clipboardRef.current) {
+        alert("Presse-papier vide. Copie (⌘C) ou détoure d'abord un élément avec l'outil SÉLECTION.");
+        drawingRef.current = false;
+        return;
+      }
+      pushUndo();
+      stampClipboardAt(pos.x, pos.y);
+      lastStampPosRef.current = pos;
+      saveLiveCanvas();
     } else if (tool === "select") {
       // Existing selection + mouse inside → enter MOVE mode (lift pixels)
       const sel = selectionRef.current;
@@ -1437,6 +1464,16 @@ export default function Editor() {
       lastAngleRef.current = stampLine(ctx, last.x, last.y, pos.x, pos.y, brushSize, c, shape, lastAngleRef.current);
       lastPosRef.current = pos;
       saveLiveCanvas();
+    } else if (tool === "stamp") {
+      const cb = clipboardRef.current;
+      if (!cb) return;
+      const last = lastStampPosRef.current;
+      const step = Math.max(8, Math.round(Math.max(cb.canvas.width, cb.canvas.height) * stampScale * 0.6));
+      if (!last || Math.hypot(pos.x - last.x, pos.y - last.y) >= step) {
+        stampClipboardAt(pos.x, pos.y);
+        lastStampPosRef.current = pos;
+        saveLiveCanvas();
+      }
     } else if (tool === "line" && overlay && startPosRef.current) {
       overlay.clearRect(0, 0, canvasW, canvasH);
       drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, aliased);
@@ -1796,6 +1833,15 @@ export default function Editor() {
           composite();
         }
         drawingRef.current = false;
+      } else if (t === "stamp") {
+        if (!clipboardRef.current) {
+          drawingRef.current = false;
+        } else {
+          pushUndo();
+          stampClipboardAt(pos.x, pos.y);
+          lastStampPosRef.current = pos;
+          composite();
+        }
       } else if (t === "select") {
         const sel = selectionRef.current;
         if (sel && selectionHit(sel, pos.x, pos.y)) {
@@ -1840,6 +1886,17 @@ export default function Editor() {
         lastAngleRef.current = stampLine(ctx, last.x, last.y, pos.x, pos.y, sz, c, shape, lastAngleRef.current);
         lastPosRef.current = pos;
         composite();
+      } else if (t === "stamp") {
+        const cb = clipboardRef.current;
+        if (cb) {
+          const last = lastStampPosRef.current;
+          const step = Math.max(8, Math.round(Math.max(cb.canvas.width, cb.canvas.height) * stampScaleRef.current * 0.6));
+          if (!last || Math.hypot(pos.x - last.x, pos.y - last.y) >= step) {
+            stampClipboardAt(pos.x, pos.y);
+            lastStampPosRef.current = pos;
+            composite();
+          }
+        }
       } else if (t === "line" && overlay && startPosRef.current) {
         overlay.clearRect(0, 0, canvasW, canvasH);
         drawLine(overlay, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, al);
@@ -2165,6 +2222,23 @@ export default function Editor() {
     setPasteFloat(null);
     // Create a fresh selection over the dropped area
     setSelection({ kind: "rect", x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height });
+  }
+
+  // Stamp the clipboard (rect or lasso copy) centered at (x, y) on the
+  // active layer's current frame. Honors stampScale.
+  function stampClipboardAt(x: number, y: number) {
+    const cb = clipboardRef.current;
+    if (!cb) return false;
+    const ctx = getCtx();
+    if (!ctx) return false;
+    const s = stampScaleRef.current;
+    const w = Math.max(1, Math.round(cb.canvas.width * s));
+    const h = Math.max(1, Math.round(cb.canvas.height * s));
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(cb.canvas, Math.round(x - w / 2), Math.round(y - h / 2), w, h);
+    ctx.restore();
+    return true;
   }
 
   function cancelPasteFloat() {
@@ -2527,6 +2601,7 @@ export default function Editor() {
         && mousePos.y >= pasteFloat.y && mousePos.y < pasteFloat.y + pasteFloat.canvas.height
         ? "move"
       : tool === "text" ? "text"
+      : tool === "stamp" ? "copy"
       : tool === "fill" ? "cell"
       : (tool === "select" && selection && mousePos && (
           selection.kind === "rect"
@@ -2872,6 +2947,61 @@ export default function Editor() {
             <div style={{ color: t.panelText, opacity: 0.55, fontSize: 12, marginLeft: "auto" }}>
               ⌘C/⌘X/⌘V · DEL EFFACER · ESC ANNULER
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAMPON tool config — preview of the current clipboard + scale */}
+      {tool === "stamp" && (
+        <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ color: t.panelText, fontSize: 14, fontWeight: "bold" }}>TAMPON :</div>
+            {clipboardRef.current ? (
+              <>
+                <div
+                  style={{
+                    width: 48, height: 48,
+                    border: `1px solid ${t.border}`,
+                    background: theme === "night" ? "#222" : "#F0EFED",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    imageRendering: "pixelated",
+                  }}
+                  title={`${clipboardRef.current.canvas.width}×${clipboardRef.current.canvas.height}`}
+                  ref={el => {
+                    if (!el || !clipboardRef.current) return;
+                    // Build a small img preview each render
+                    el.innerHTML = "";
+                    const cb = clipboardRef.current.canvas;
+                    const img = document.createElement("img");
+                    img.src = cb.toDataURL();
+                    img.style.maxWidth = "100%";
+                    img.style.maxHeight = "100%";
+                    img.style.imageRendering = "pixelated";
+                    el.appendChild(img);
+                  }}
+                  key={clipboardKey}
+                />
+                <span style={{ color: t.panelText, fontSize: 12, opacity: 0.7, fontVariantNumeric: "tabular-nums" }}>
+                  {clipboardRef.current.canvas.width}×{clipboardRef.current.canvas.height} px
+                </span>
+                <span style={{ color: t.panelText, fontSize: 14 }}>ÉCHELLE :</span>
+                <input
+                  type="range" min={25} max={400} value={Math.round(stampScale * 100)}
+                  onChange={e => setStampScale(Number(e.target.value) / 100)}
+                  style={{ width: 100, accentColor: t.accent }}
+                />
+                <span style={{ color: t.panelText, fontSize: 12, minWidth: 40, fontVariantNumeric: "tabular-nums" }}>
+                  {Math.round(stampScale * 100)}%
+                </span>
+                <div style={{ color: t.panelText, opacity: 0.55, fontSize: 12, marginLeft: "auto" }}>
+                  CLIQUE OU GLISSE POUR TAMPONNER
+                </div>
+              </>
+            ) : (
+              <div style={{ color: t.panelText, opacity: 0.7, fontSize: 13 }}>
+                Presse-papier vide — sélectionne quelque chose puis ⌘C (ou DÉTOURER) pour charger le tampon.
+              </div>
+            )}
           </div>
         </div>
       )}
