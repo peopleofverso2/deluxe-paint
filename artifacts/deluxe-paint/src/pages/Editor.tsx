@@ -1638,10 +1638,51 @@ export default function Editor() {
     saveCurrentFrame();
   }
 
-  // Crop every frame to the selection's bounding box. Adjusts canvas
-  // dimensions too. For lasso, the polygon mask is also applied so areas
-  // outside the polygon become transparent / bg-fill.
-  function cropToSelection() {
+  // DÉTOURER — keep only what's inside the selection on the current frame.
+  // The canvas dimensions are unchanged; everything outside the selection
+  // is filled with the current bgColor (for lasso, the mask is applied
+  // so only the polygon's pixels survive).
+  function detourSelection() {
+    const sel = selectionRef.current;
+    if (!sel) return;
+    const ctx = getCtx();
+    const src = canvasRef.current;
+    if (!ctx || !src) return;
+    const b = sel.kind === "rect" ? sel : sel.bbox;
+    if (b.w < 1 || b.h < 1) return;
+    // 1) Snapshot the selected content into an offscreen (mask-aware)
+    const off = document.createElement("canvas");
+    off.width = b.w;
+    off.height = b.h;
+    const octx = off.getContext("2d")!;
+    octx.imageSmoothingEnabled = false;
+    if (sel.kind === "lasso") {
+      const local = new Path2D();
+      local.moveTo(sel.points[0].x - b.x, sel.points[0].y - b.y);
+      for (let i = 1; i < sel.points.length; i++) local.lineTo(sel.points[i].x - b.x, sel.points[i].y - b.y);
+      local.closePath();
+      octx.save();
+      octx.clip(local);
+      octx.drawImage(src, -b.x, -b.y);
+      octx.restore();
+    } else {
+      octx.drawImage(src, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+    }
+    // 2) Wipe the frame to bg and paste the snapshot back at its place
+    ctx.save();
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, canvasW, canvasH);
+    ctx.drawImage(off, b.x, b.y);
+    ctx.restore();
+    saveLiveCanvas();
+    saveCurrentFrame();
+    // Selection persists so the user can iterate
+  }
+
+  // RECADRER — resize the canvas (and rescale every frame) so it matches
+  // the selection's bounding box. Lasso also masks each frame so areas
+  // outside the polygon become bg-fill.
+  function cropFrameToSelection() {
     const sel = selectionRef.current;
     if (!sel) return;
     const b = selBox(sel);
@@ -2360,7 +2401,8 @@ export default function Editor() {
             >COLLER</button>
             {selection && (
               <>
-                <button className="amiga-button" onClick={cropToSelection} title="Recadre le canvas (et toutes les frames) à la sélection" style={{ padding: "2px 10px" }}>✂ DÉTOURER</button>
+                <button className="amiga-button" onClick={detourSelection} title="Isole la forme : remplit le reste de la frame avec la couleur de fond (canvas inchangé)" style={{ padding: "2px 10px" }}>⌖ DÉTOURER</button>
+                <button className="amiga-button" onClick={cropFrameToSelection} title="Recadre le canvas et toutes les frames à la sélection (change la taille du projet)" style={{ padding: "2px 10px" }}>✂ RECADRER</button>
                 <button className="amiga-button" onClick={eraseSelection} title="Efface le contenu (couleur de fond)" style={{ padding: "2px 10px" }}>EFFACER</button>
                 <button className="amiga-button" onClick={() => setSelection(null)} title="Annule la sélection (ESC)" style={{ padding: "2px 10px" }}>ANNULER</button>
               </>
