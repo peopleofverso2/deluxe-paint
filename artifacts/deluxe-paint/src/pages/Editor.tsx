@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { GIFEncoder, quantize, applyPalette } from "gifenc";
 
 type Tool =
@@ -807,6 +807,11 @@ export default function Editor() {
   // (lasso) copies keep their alpha; .x/.y remember the original position
   // so PASTE can drop it back in place.
   const clipboardRef = useRef<{ canvas: HTMLCanvasElement; x: number; y: number } | null>(null);
+  // Undo / redo — per-frame ImageData snapshots, trimmed to a memory
+  // budget so a 4K canvas (33MB per snapshot) doesn't OOM the tab.
+  const historyRef = useRef<Map<number, { undo: ImageData[]; redo: ImageData[] }>>(new Map());
+  const UNDO_MEM_BUDGET = 100 * 1024 * 1024; // 100 MB per frame
+  const [historyTick, setHistoryTick] = useState(0); // bumps to re-enable/disable buttons
   const [clipboardKey, setClipboardKey] = useState(0); // bumps to re-render the COLLER button enabled state
   // Floating paste — when non-null, the pasted bitmap is shown as a
   // movable preview on the overlay. It's committed to the frame only
@@ -1184,12 +1189,14 @@ export default function Editor() {
     if (!ctx) return;
 
     if (tool === "pencil" || tool === "eraser") {
+      pushUndo();
       const c = tool === "eraser" ? bgColor : color;
       // Eraser always uses a plain square; brush shapes are for the pencil.
       const shape: BrushShape = tool === "eraser" ? "square" : brushShape;
       stampBrush(ctx, pos.x, pos.y, brushSize, c, shape, lastAngleRef.current);
       saveLiveCanvas();
     } else if (tool === "fill") {
+      pushUndo();
       floodFill(ctx, pos.x, pos.y, color);
       saveLiveCanvas();
       drawingRef.current = false;
@@ -1200,6 +1207,7 @@ export default function Editor() {
       drawingRef.current = false;
     } else if (tool === "text") {
       if (textInput) {
+        pushUndo();
         const font = TEXT_FONTS[textFontIdx];
         stampText(ctx, pos.x, pos.y, color, textInput, font.family, textSize, aliased, !!font.pixel);
         saveLiveCanvas();
@@ -1209,6 +1217,7 @@ export default function Editor() {
       // Existing selection + mouse inside → enter MOVE mode (lift pixels)
       const sel = selectionRef.current;
       if (sel && selectionHit(sel, pos.x, pos.y)) {
+        pushUndo();
         liftSelection(sel, pos.x, pos.y);
         renderFloat(pos.x, pos.y);
         // drawingRef stays true so move/up are recognized as a drag
@@ -1319,12 +1328,15 @@ export default function Editor() {
     if (!ctx || !startPosRef.current) return;
 
     if (tool === "line") {
+      pushUndo();
       drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, aliased);
       saveLiveCanvas();
     } else if (tool === "rect" || tool === "rect-fill") {
+      pushUndo();
       drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "rect-fill", aliased);
       saveLiveCanvas();
     } else if (tool === "ellipse" || tool === "ellipse-fill") {
+      pushUndo();
       drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, brushSize, tool === "ellipse-fill", aliased);
       saveLiveCanvas();
     } else if (tool === "select") {
@@ -1498,6 +1510,14 @@ export default function Editor() {
       }
 
       const mod = e.metaKey || e.ctrlKey;
+      // Undo / redo
+      if (mod && (e.key === "z" || e.key === "Z")) {
+        if (e.shiftKey) redo(); else undo();
+        e.preventDefault(); return;
+      }
+      if (mod && (e.key === "y" || e.key === "Y")) {
+        redo(); e.preventDefault(); return;
+      }
       if (mod && (e.key === "c" || e.key === "C")) {
         if (selectionRef.current) { copySelection(); e.preventDefault(); }
       } else if (mod && (e.key === "x" || e.key === "X")) {
@@ -1577,11 +1597,13 @@ export default function Editor() {
       const color = fgColorRef.current;
       const t = toolRef.current;
       if (t === "pencil" || t === "eraser") {
+        pushUndo();
         const c = t === "eraser" ? bgColorRef.current : color;
         const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
         stampBrush(ctx, pos.x, pos.y, brushSizeRef.current, c, shape, lastAngleRef.current);
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "fill") {
+        pushUndo();
         floodFill(ctx, pos.x, pos.y, color);
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
         drawingRef.current = false;
@@ -1592,6 +1614,7 @@ export default function Editor() {
       } else if (t === "text") {
         const txt = textInputRef.current;
         if (txt) {
+          pushUndo();
           const font = TEXT_FONTS[textFontIdxRef.current];
           stampText(ctx, pos.x, pos.y, color, txt, font.family, textSizeRef.current, aliasedRef.current, !!font.pixel);
           liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
@@ -1600,6 +1623,7 @@ export default function Editor() {
       } else if (t === "select") {
         const sel = selectionRef.current;
         if (sel && selectionHit(sel, pos.x, pos.y)) {
+          pushUndo();
           liftSelection(sel, pos.x, pos.y);
           renderFloat(pos.x, pos.y);
         } else {
@@ -1671,12 +1695,15 @@ export default function Editor() {
       const al = aliasedRef.current;
       const pos = lastPosRef.current ?? startPosRef.current;
       if (t === "line") {
+        pushUndo();
         drawLine(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, al);
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "rect" || t === "rect-fill") {
+        pushUndo();
         drawRect(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "rect-fill", al);
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       } else if (t === "ellipse" || t === "ellipse-fill") {
+        pushUndo();
         drawEllipse(ctx, startPosRef.current.x, startPosRef.current.y, pos.x, pos.y, color, sz, t === "ellipse-fill", al);
         liveDataRef.current = ctx.getImageData(0, 0, canvasW, canvasH);
       }
@@ -1715,6 +1742,7 @@ export default function Editor() {
     setFrameCount(1);
     currentFrameRef.current = 0;
     setCurrentFrame(0);
+    clearHistory();
     const ctx = getCtx();
     if (ctx) { clearCanvas(ctx); saveLiveCanvas(); }
   }
@@ -1732,6 +1760,7 @@ export default function Editor() {
     if (!sel) return;
     const ctx = getCtx();
     if (!ctx) return;
+    pushUndo();
     ctx.save();
     if (sel.kind === "lasso") ctx.clip(selectionPath(sel));
     ctx.fillStyle = bgColor;
@@ -1754,6 +1783,7 @@ export default function Editor() {
     if (!ctx || !src) return;
     const b = sel.kind === "rect" ? sel : sel.bbox;
     if (b.w < 1 || b.h < 1) return;
+    pushUndo();
     // 1) Snapshot the selected content into an offscreen (mask-aware)
     const off = document.createElement("canvas");
     off.width = b.w;
@@ -1792,6 +1822,7 @@ export default function Editor() {
     const b = selBox(sel);
     if (b.w < 1 || b.h < 1) return;
     stopPlayback();
+    clearHistory();
     const ctx = getCtx();
     if (ctx) framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
     const tmp = document.createElement("canvas");
@@ -1859,6 +1890,78 @@ export default function Editor() {
     setClipboardKey(k => k + 1);
   }
 
+  // ---- Undo / redo --------------------------------------------------
+  function getHist(idx: number) {
+    let h = historyRef.current.get(idx);
+    if (!h) { h = { undo: [], redo: [] }; historyRef.current.set(idx, h); }
+    return h;
+  }
+
+  // Capture current canvas state to the current-frame's undo stack. Trims
+  // by memory budget. Clears redo (new action invalidates the redo line).
+  function pushUndo() {
+    const ctx = getCtx();
+    if (!ctx) return;
+    const idx = currentFrameRef.current;
+    const h = getHist(idx);
+    const snap = ctx.getImageData(0, 0, canvasW, canvasH);
+    h.undo.push(snap);
+    let total = h.undo.reduce((s, d) => s + d.data.byteLength, 0);
+    while (total > UNDO_MEM_BUDGET && h.undo.length > 1) {
+      const drop = h.undo.shift()!;
+      total -= drop.data.byteLength;
+    }
+    h.redo = [];
+    setHistoryTick(k => k + 1);
+  }
+
+  function undo() {
+    const idx = currentFrameRef.current;
+    const h = getHist(idx);
+    const prev = h.undo.pop();
+    if (!prev) return;
+    const ctx = getCtx();
+    if (!ctx) return;
+    // Snapshots are tied to the canvas dimensions captured at that time;
+    // if they no longer match (e.g. after a RÉSO switch since), bail.
+    if (prev.width !== canvasW || prev.height !== canvasH) return;
+    h.redo.push(ctx.getImageData(0, 0, canvasW, canvasH));
+    ctx.putImageData(prev, 0, 0);
+    saveLiveCanvas();
+    saveCurrentFrame();
+    setHistoryTick(k => k + 1);
+  }
+
+  function redo() {
+    const idx = currentFrameRef.current;
+    const h = getHist(idx);
+    const next = h.redo.pop();
+    if (!next) return;
+    const ctx = getCtx();
+    if (!ctx) return;
+    if (next.width !== canvasW || next.height !== canvasH) return;
+    h.undo.push(ctx.getImageData(0, 0, canvasW, canvasH));
+    ctx.putImageData(next, 0, 0);
+    saveLiveCanvas();
+    saveCurrentFrame();
+    setHistoryTick(k => k + 1);
+  }
+
+  function clearHistory() {
+    historyRef.current.clear();
+    setHistoryTick(k => k + 1);
+  }
+
+  // Re-derive button enable state when history mutates or frame switches.
+  const canUndo = useMemo(() => {
+    void historyTick; // include in deps so the memo recomputes on bump
+    return (historyRef.current.get(currentFrame)?.undo.length ?? 0) > 0;
+  }, [historyTick, currentFrame]);
+  const canRedo = useMemo(() => {
+    void historyTick;
+    return (historyRef.current.get(currentFrame)?.redo.length ?? 0) > 0;
+  }, [historyTick, currentFrame]);
+
   // Paste: enter floating mode — the clipboard is shown as a movable
   // preview on the overlay (NOT yet committed). The user repositions it,
   // then commits by clicking outside / pressing Enter / switching tools.
@@ -1878,6 +1981,7 @@ export default function Editor() {
     if (!f) return;
     const ctx = getCtx();
     if (!ctx) { setPasteFloat(null); return; }
+    pushUndo();
     ctx.save();
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(f.canvas, f.x, f.y);
@@ -2003,6 +2107,7 @@ export default function Editor() {
   function switchResolution(newW: number, newH: number) {
     if (newW === canvasW && newH === canvasH) return;
     stopPlayback();
+    clearHistory();
     // Persist any unsaved live edits before rescaling
     const ctx = getCtx();
     if (ctx) framesDataRef.current[currentFrameRef.current] = ctx.getImageData(0, 0, canvasW, canvasH);
@@ -2129,6 +2234,7 @@ export default function Editor() {
       const n = framesDataRef.current.length;
       frameCountRef.current = n;
       setFrameCount(n);
+      clearHistory();
       if (typeof data.fps === "number") setFps(data.fps);
       if (typeof data.looping === "boolean") { setLooping(data.looping); loopingRef.current = data.looping; }
       const start = typeof data.currentFrame === "number" ? Math.min(Math.max(0, data.currentFrame), n - 1) : 0;
@@ -2155,6 +2261,7 @@ export default function Editor() {
       const ctx = getCtx();
       if (!ctx) return;
       stopPlayback();
+      pushUndo();
       // Fit image inside canvas while preserving aspect ratio; letterbox
       // the empty area with the current bgColor so the frame stays opaque.
       const ratio = Math.min(canvasW / img.width, canvasH / img.height);
@@ -2300,6 +2407,20 @@ export default function Editor() {
           style={{ display: "none" }}
           onChange={onImageFileSelected}
         />
+        <button
+          className="amiga-button"
+          onClick={undo}
+          disabled={!canUndo}
+          title="Annuler (⌘Z)"
+          style={{ padding: "2px 8px", height: 24, marginLeft: 4, opacity: canUndo ? 1 : 0.4 }}
+        >↶</button>
+        <button
+          className="amiga-button"
+          onClick={redo}
+          disabled={!canRedo}
+          title="Rétablir (⌘⇧Z / ⌘Y)"
+          style={{ padding: "2px 8px", height: 24, opacity: canRedo ? 1 : 0.4 }}
+        >↷</button>
         <MenuDropdown label="RÉSO" items={RESOLUTIONS.map(r => ({
           label: `${r.label} ${r.w}×${r.h}${r.w === canvasW && r.h === canvasH ? " ✓" : ""}`,
           action: () => {
