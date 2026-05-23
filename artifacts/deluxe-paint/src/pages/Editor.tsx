@@ -760,6 +760,33 @@ const BRUSH_SIZE_MAX = 512;
 // 320 × 12 = 3840 (4K width). Last level fills a 4K display horizontally.
 const ZOOM_LEVELS = [1, 2, 4, 8, 12];
 
+// Curated set of Google Fonts surfaced in the picker dropdown. The user
+// can also type any exact name via "Autre…" if their favourite isn't here.
+const POPULAR_GOOGLE_FONTS: { group: string; names: string[] }[] = [
+  { group: "Pixel · Rétro", names: [
+    "VT323", "Press Start 2P", "Silkscreen", "Pixelify Sans",
+    "Major Mono Display", "Orbitron", "Bungee", "Monoton",
+  ]},
+  { group: "Display", names: [
+    "Lobster", "Pacifico", "Righteous", "Audiowide", "Black Ops One",
+    "Faster One", "Special Elite", "Abril Fatface",
+  ]},
+  { group: "Handwriting", names: [
+    "Caveat", "Dancing Script", "Permanent Marker", "Indie Flower",
+    "Satisfy", "Sacramento", "Kalam", "Shadows Into Light",
+  ]},
+  { group: "Sans", names: [
+    "Roboto", "Open Sans", "Lato", "Montserrat", "Poppins",
+    "Raleway", "Ubuntu", "Nunito", "Work Sans", "Inter",
+  ]},
+  { group: "Serif", names: [
+    "Playfair Display", "Merriweather", "Lora", "EB Garamond", "PT Serif",
+  ]},
+  { group: "Mono", names: [
+    "JetBrains Mono", "Fira Code", "Source Code Pro", "IBM Plex Mono", "Roboto Mono",
+  ]},
+];
+
 const TEXT_FONTS: { label: string; family: string; pixel?: boolean }[] = [
   // Pixel-art webfonts (Amiga vibe)
   { label: "VT323",   family: "'VT323', monospace", pixel: true },
@@ -895,13 +922,8 @@ export default function Editor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleAddGoogleFont() {
-    const raw = prompt(
-      "Nom de la police Google Fonts (orthographe exacte, ex : Roboto, Bungee, Lobster, Press Start 2P, Caveat) :",
-      "Roboto",
-    );
-    if (!raw) return;
-    const family = raw.trim();
+  async function loadAndAddGoogleFont(family: string) {
+    family = family.trim();
     if (!family) return;
     loadGoogleFontStylesheet(family);
     try { await document.fonts.load(`16px "${family}"`); } catch {}
@@ -910,19 +932,27 @@ export default function Editor() {
       return;
     }
     const familySpec = `"${family}", sans-serif`;
-    if (googleFonts.some(f => f.family === familySpec)) {
-      // Already loaded — switch to it
-      const idx = TEXT_FONTS.length + googleFonts.findIndex(f => f.family === familySpec);
-      setTextFontIdx(idx);
+    // Already loaded — just switch to it
+    const existing = googleFonts.findIndex(f => f.family === familySpec);
+    if (existing >= 0) {
+      setTextFontIdx(TEXT_FONTS.length + existing);
       return;
     }
     const added = { label: family.toUpperCase().slice(0, 14), family: familySpec };
     setGoogleFonts(prev => {
       const next = [...prev, added];
-      // Auto-select the newly added font
       setTextFontIdx(TEXT_FONTS.length + next.length - 1);
       return next;
     });
+  }
+
+  async function handleAddGoogleFont() {
+    const raw = prompt(
+      "Nom de la police Google Fonts (orthographe exacte, ex : Roboto, Bungee, Lobster, Press Start 2P, Caveat) :",
+      "Roboto",
+    );
+    if (!raw) return;
+    await loadAndAddGoogleFont(raw);
   }
 
   function handleRemoveGoogleFont(idx: number) {
@@ -3436,12 +3466,20 @@ export default function Editor() {
                   </span>
                 );
               })}
-              <button
-                className="amiga-button"
-                onClick={handleAddGoogleFont}
-                title="Ajouter une police Google Fonts (chargée à la volée, conservée pour les sessions suivantes)"
-                style={{ padding: "2px 8px", color: t.panelText, fontWeight: "bold" }}
-              >+ GOOGLE</button>
+              <MenuDropdown
+                label="+ GOOGLE ▾"
+                items={[
+                  ...POPULAR_GOOGLE_FONTS.flatMap(group => [
+                    { label: `— ${group.group} —`, action: () => {} },
+                    ...group.names.map(name => ({
+                      label: `   ${name}`,
+                      action: () => loadAndAddGoogleFont(name),
+                    })),
+                  ]),
+                  { label: "—", action: () => {} },
+                  { label: "✎ Autre… (nom exact)", action: handleAddGoogleFont },
+                ]}
+              />
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
               <span style={{ color: t.panelText, fontSize: 14 }}>TAILLE :</span>
