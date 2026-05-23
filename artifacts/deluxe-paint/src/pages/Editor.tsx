@@ -858,6 +858,78 @@ export default function Editor() {
   const [textInput, setTextInput] = useState("TEXTE");
   const [textFontIdx, setTextFontIdx] = useState(0);
   const [textSize, setTextSize] = useState(16);
+  // User-added Google Fonts — appended to TEXT_FONTS. Persisted in
+  // localStorage so they survive reloads.
+  const [googleFonts, setGoogleFonts] = useState<{ label: string; family: string }[]>(() => {
+    try { return JSON.parse(localStorage.getItem("dpaint-google-fonts") || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("dpaint-google-fonts", JSON.stringify(googleFonts)); } catch {}
+  }, [googleFonts]);
+  // Combined font list (TEXT_FONTS + user-added Google Fonts)
+  const allFonts = useMemo(() => [
+    ...TEXT_FONTS,
+    ...googleFonts.map(f => ({ ...f, pixel: false })),
+  ], [googleFonts]);
+  const allFontsRef = useRef(allFonts);
+  useEffect(() => { allFontsRef.current = allFonts; }, [allFonts]);
+
+  // Inject the Google Fonts stylesheet for a given family name. Idempotent.
+  function loadGoogleFontStylesheet(family: string) {
+    const safe = encodeURIComponent(family.replace(/\s+/g, "+"));
+    const href = `https://fonts.googleapis.com/css2?family=${safe}&display=swap`;
+    if (document.querySelector(`link[data-google-font="${family}"]`)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    link.setAttribute("data-google-font", family);
+    document.head.appendChild(link);
+  }
+  // Re-load every persisted font on mount
+  useEffect(() => {
+    googleFonts.forEach(f => {
+      // family is stored as `"Roboto", sans-serif` — extract the bare name
+      const m = f.family.match(/^"([^"]+)"/);
+      if (m) loadGoogleFontStylesheet(m[1]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleAddGoogleFont() {
+    const raw = prompt(
+      "Nom de la police Google Fonts (orthographe exacte, ex : Roboto, Bungee, Lobster, Press Start 2P, Caveat) :",
+      "Roboto",
+    );
+    if (!raw) return;
+    const family = raw.trim();
+    if (!family) return;
+    loadGoogleFontStylesheet(family);
+    try { await document.fonts.load(`16px "${family}"`); } catch {}
+    if (!document.fonts.check(`16px "${family}"`)) {
+      alert(`Police "${family}" introuvable sur Google Fonts.\nVérifie l'orthographe exacte sur https://fonts.google.com.`);
+      return;
+    }
+    const familySpec = `"${family}", sans-serif`;
+    if (googleFonts.some(f => f.family === familySpec)) {
+      // Already loaded — switch to it
+      const idx = TEXT_FONTS.length + googleFonts.findIndex(f => f.family === familySpec);
+      setTextFontIdx(idx);
+      return;
+    }
+    const added = { label: family.toUpperCase().slice(0, 14), family: familySpec };
+    setGoogleFonts(prev => {
+      const next = [...prev, added];
+      // Auto-select the newly added font
+      setTextFontIdx(TEXT_FONTS.length + next.length - 1);
+      return next;
+    });
+  }
+
+  function handleRemoveGoogleFont(idx: number) {
+    setGoogleFonts(prev => prev.filter((_, i) => i !== idx));
+    // If the active font was removed or shifted, reset to the first preset
+    if (textFontIdx >= TEXT_FONTS.length + idx) setTextFontIdx(0);
+  }
 
   // Selection state. A selection is either a rectangle or a polygon
   // (lasso); both carry their bounding box for clipboard / crop ops.
@@ -1496,7 +1568,7 @@ export default function Editor() {
     } else if (tool === "text") {
       if (textInput) {
         pushUndo();
-        const font = TEXT_FONTS[textFontIdx];
+        const font = allFonts[textFontIdx] ?? TEXT_FONTS[0];
         stampText(ctx, pos.x, pos.y, color, textInput, font.family, textSize, aliased, !!font.pixel);
         saveLiveCanvas();
       }
@@ -1935,7 +2007,7 @@ export default function Editor() {
         const txt = textInputRef.current;
         if (txt) {
           pushUndo();
-          const font = TEXT_FONTS[textFontIdxRef.current];
+          const font = allFontsRef.current[textFontIdxRef.current] ?? TEXT_FONTS[0];
           stampText(ctx, pos.x, pos.y, color, txt, font.family, textSizeRef.current, aliasedRef.current, !!font.pixel);
           composite();
         }
@@ -3319,13 +3391,13 @@ export default function Editor() {
                 color: t.panelText,
                 border: `1px solid ${t.border}`,
                 padding: "2px 6px",
-                fontFamily: TEXT_FONTS[textFontIdx].family,
+                fontFamily: (allFonts[textFontIdx] ?? TEXT_FONTS[0]).family,
                 fontSize: 14,
                 minWidth: 200,
                 flex: "1 1 200px",
               }}
             />
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
               <span style={{ color: t.panelText, fontSize: 14 }}>POLICE :</span>
               {TEXT_FONTS.map((f, i) => (
                 <button
@@ -3339,6 +3411,37 @@ export default function Editor() {
                   {f.label}
                 </button>
               ))}
+              {googleFonts.map((f, gi) => {
+                const idx = TEXT_FONTS.length + gi;
+                return (
+                  <span
+                    key={f.family}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 2 }}
+                  >
+                    <button
+                      className="amiga-button"
+                      data-active={textFontIdx === idx}
+                      onClick={() => setTextFontIdx(idx)}
+                      style={{ padding: "2px 8px", color: t.panelText, fontFamily: f.family }}
+                      title={`${f.label} (Google Font)`}
+                    >
+                      {f.label}
+                    </button>
+                    <button
+                      className="amiga-button"
+                      onClick={() => { if (confirm(`Retirer "${f.label}" de la liste ?`)) handleRemoveGoogleFont(gi); }}
+                      title="Retirer cette police Google"
+                      style={{ padding: "0 4px", fontSize: 10, color: "#C04849" }}
+                    >×</button>
+                  </span>
+                );
+              })}
+              <button
+                className="amiga-button"
+                onClick={handleAddGoogleFont}
+                title="Ajouter une police Google Fonts (chargée à la volée, conservée pour les sessions suivantes)"
+                style={{ padding: "2px 8px", color: t.panelText, fontWeight: "bold" }}
+              >+ GOOGLE</button>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
               <span style={{ color: t.panelText, fontSize: 14 }}>TAILLE :</span>
@@ -3378,7 +3481,7 @@ export default function Editor() {
               ))}
             </div>
             <div style={{ color: t.panelText, opacity: 0.55, fontSize: 12, marginLeft: "auto" }}>
-              {TEXT_FONTS[textFontIdx].pixel ? "PIXEL · " : "HD · "}
+              {(allFonts[textFontIdx]?.pixel) ? "PIXEL · " : "HD · "}
               CLIC SUR LE CANVAS POUR TAMPONNER
             </div>
           </div>
