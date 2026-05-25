@@ -19,6 +19,7 @@ COPY lib/db/package.json lib/db/
 COPY artifacts/deluxe-paint/package.json artifacts/deluxe-paint/
 COPY artifacts/api-server/package.json artifacts/api-server/
 COPY artifacts/mockup-sandbox/package.json artifacts/mockup-sandbox/
+COPY artifacts/dpaint-mcp/package.json artifacts/dpaint-mcp/
 
 RUN pnpm install --frozen-lockfile
 

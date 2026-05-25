@@ -1,0 +1,22 @@
+{
+  "name": "@workspace/dpaint-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "dpaint-mcp": "./dist/index.mjs"
+  },
+  "scripts": {
+    "build": "node ./build.mjs",
+    "start": "node ./dist/index.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "esbuild": "0.27.3"
+  }
+}
