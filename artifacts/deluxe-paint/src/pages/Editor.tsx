@@ -900,6 +900,9 @@ export default function Editor() {
   // ---- SON OPTIQUE (optical sound) ----
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioSrcRef = useRef<AudioBufferSourceNode | null>(null);
+  // Persistent audio tap for ● REC: optical sound also routes here so the
+  // recorded video carries the soundtrack. Created lazily on first REC.
+  const recAudioDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
 
   function stopOpticalSound() {
     try { audioSrcRef.current?.stop(); } catch { /* already stopped */ }
@@ -937,6 +940,10 @@ export default function Editor() {
     src.buffer = buf;
     src.loop = looping;
     src.connect(ctx.destination);
+    // If a recording tap exists, feed it too — the video gets the sound
+    if (recAudioDestRef.current) {
+      try { src.connect(recAudioDestRef.current); } catch { /* noop */ }
+    }
     src.start();
     audioSrcRef.current = src;
   }
@@ -1668,24 +1675,43 @@ export default function Editor() {
       alert("Votre navigateur ne supporte pas l'enregistrement vidéo du canvas.");
       return;
     }
-    const stream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(30);
+    const videoStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(30);
+
+    // AUDIO: route the optical-sound output into the recording. We create
+    // the audio tap (MediaStreamAudioDestinationNode) up-front so the
+    // recording has an audio track from t=0 — silent until the user hits
+    // SON ▶ JOUER, at which point playOpticalSound also connects to it.
+    const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
+    void actx.resume(); // REC click is a user gesture
+    if (!recAudioDestRef.current) recAudioDestRef.current = actx.createMediaStreamDestination();
+    const audioDest = recAudioDestRef.current;
+    // If a sound is ALREADY playing, tap it too
+    try { audioSrcRef.current?.connect(audioDest); } catch { /* already connected */ }
+
+    const stream = new MediaStream([
+      ...videoStream.getVideoTracks(),
+      ...audioDest.stream.getAudioTracks(),
+    ]);
+
+    // Audio-capable codec combos FIRST — a video-only `codecs=` value can
+    // make MediaRecorder drop or refuse the audio track.
     const mimeCandidates = [
-      "video/mp4;codecs=avc1.42E01E",
-      "video/mp4;codecs=avc1",
-      "video/mp4;codecs=h264",
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
       "video/mp4",
-      "video/webm;codecs=vp9",
-      "video/webm;codecs=vp8",
       "video/webm",
+      "video/mp4;codecs=avc1.42E01E",
+      "video/webm;codecs=vp9",
     ];
     const mimeType = typeof MediaRecorder !== "undefined"
       ? (mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || "")
       : "";
     let recorder: MediaRecorder;
     try {
-      recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 2_500_000 } : undefined);
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 128_000 } : undefined);
     } catch (err) {
-      stream.getTracks().forEach(t => t.stop());
+      videoStream.getTracks().forEach(t => t.stop());
       alert("Impossible de démarrer l'enregistrement: " + (err instanceof Error ? err.message : String(err)));
       return;
     }
@@ -1696,7 +1722,9 @@ export default function Editor() {
       if (e.data && e.data.size > 0) recChunksRef.current.push(e.data);
     };
     recorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
+      // Stop only the VIDEO tracks — the audio tap (recAudioDestRef) is
+      // persistent and reused by the next recording.
+      videoStream.getTracks().forEach(t => t.stop());
       const blob = new Blob(recChunksRef.current, { type: actualMime });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -1724,7 +1752,9 @@ export default function Editor() {
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       recorder.stop();
-      recorder.stream.getTracks().forEach(t => t.stop());
+      // Stop only video tracks — the audio tap is persistent (see
+      // recAudioDestRef) and feeds any future recording.
+      recorder.stream.getVideoTracks().forEach(t => t.stop());
     }
     mediaRecorderRef.current = null;
     if (recTimerRef.current) {
@@ -1740,7 +1770,7 @@ export default function Editor() {
       const rec = mediaRecorderRef.current;
       if (rec) {
         try { if (rec.state !== "inactive") rec.stop(); } catch {}
-        try { rec.stream.getTracks().forEach(t => t.stop()); } catch {}
+        try { rec.stream.getVideoTracks().forEach(t => t.stop()); } catch {}
       }
       if (recTimerRef.current) clearInterval(recTimerRef.current);
     };
