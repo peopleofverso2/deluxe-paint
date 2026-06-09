@@ -955,6 +955,128 @@ export default function Editor() {
     downloadBlob(encodeWav(samples, sampleRate), `dpaint-son-optique-${mode}-${ts}.wav`);
   }
 
+  // ---- EXPORT VIDÉO — automated render with the optical soundtrack ----
+  // Unlike ● REC (live session capture, manual timing), this renders the
+  // animation loop offscreen at exact fps for N loops, with the optical
+  // sound baked into the file, then downloads it. The clip you'd post.
+  const exportingVideoRef = useRef(false);
+
+  function pickRecorderMime(): string {
+    const candidates = [
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/mp4",
+      "video/webm",
+    ];
+    if (typeof MediaRecorder === "undefined") return "";
+    return candidates.find(m => MediaRecorder.isTypeSupported(m)) || "";
+  }
+
+  function exportVideo(mode: OpticalMode | "silent") {
+    if (recording) { alert("Arrête d'abord l'enregistrement ● REC."); return; }
+    if (exportingVideoRef.current) { alert("Un export vidéo est déjà en cours."); return; }
+    const n = frameCountOf();
+    const frameDur = 1 / Math.max(1, fps);
+    const loopDur = n * frameDur;
+    const defaultLoops = Math.max(1, Math.ceil(4 / loopDur)); // ≥ ~4 s of video
+    const raw = prompt(`Nombre de boucles à exporter (1 boucle = ${loopDur.toFixed(2)}s) :`, String(defaultLoops));
+    if (!raw) return;
+    const loops = Math.max(1, Math.min(100, Math.round(Number(raw) || defaultLoops)));
+    const totalDur = loops * loopDur;
+
+    exportingVideoRef.current = true;
+    stopLiveSound();
+    stopOpticalSound();
+
+    // Offscreen render target — blit layers directly (no intermediate
+    // full-res canvases, important at 4K)
+    const off = document.createElement("canvas");
+    off.width = canvasW;
+    off.height = canvasH;
+    const octx = off.getContext("2d")!;
+    const drawFrameTo = (idx: number) => {
+      octx.save();
+      octx.imageSmoothingEnabled = false;
+      octx.fillStyle = "#FFFFFF";
+      octx.fillRect(0, 0, off.width, off.height);
+      for (const layer of layersRef.current) {
+        if (!layer.visible) continue;
+        const c = layer.frames[idx];
+        if (!c) continue;
+        octx.globalAlpha = layer.opacity;
+        octx.drawImage(c, 0, 0);
+      }
+      octx.restore();
+    };
+    drawFrameTo(0);
+
+    const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
+    void actx.resume();
+    const dest = actx.createMediaStreamDestination();
+    let src: AudioBufferSourceNode | null = null;
+    if (mode !== "silent") {
+      const { samples, sampleRate } = buildOpticalSamples(mode);
+      const buf = actx.createBuffer(1, samples.length, sampleRate);
+      buf.copyToChannel(new Float32Array(samples), 0);
+      src = actx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      src.connect(dest);
+      src.connect(actx.destination); // monitoring — hear the render
+    }
+
+    const videoStream = (off as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(30);
+    const stream = new MediaStream([
+      ...videoStream.getVideoTracks(),
+      ...dest.stream.getAudioTracks(),
+    ]);
+    const mimeType = pickRecorderMime();
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 6_000_000, audioBitsPerSecond: 128_000 } : undefined);
+    } catch (err) {
+      exportingVideoRef.current = false;
+      videoStream.getTracks().forEach(t => t.stop());
+      alert("Export vidéo impossible : " + (err instanceof Error ? err.message : String(err)));
+      return;
+    }
+    const actualMime = recorder.mimeType || mimeType || "video/webm";
+    const ext = actualMime.includes("mp4") ? "mp4" : "webm";
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    recorder.onstop = () => {
+      videoStream.getTracks().forEach(t => t.stop());
+      try { src?.stop(); } catch { /* noop */ }
+      const blob = new Blob(chunks, { type: actualMime });
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      downloadBlob(blob, `dpaint-video-${mode}-${ts}.${ext}`);
+      exportingVideoRef.current = false;
+    };
+
+    // Drive everything off the audio clock for drift-free sync
+    const t0 = actx.currentTime + 0.15;
+    if (src) src.start(t0);
+    recorder.start(250);
+    let lastIdx = 0;
+    const driver = () => {
+      const t2 = actx.currentTime - t0;
+      if (t2 >= totalDur) {
+        try { recorder.stop(); } catch { /* noop */ }
+        return;
+      }
+      if (t2 >= 0) {
+        const idx = Math.min(n - 1, Math.floor((t2 % loopDur) / frameDur));
+        if (idx !== lastIdx) {
+          drawFrameTo(idx);
+          lastIdx = idx;
+        }
+      }
+      requestAnimationFrame(driver);
+    };
+    requestAnimationFrame(driver);
+  }
+
   // ---- SPECTRO LIVE — real-time optical synthesizer ----
   // A permanent bank of 64 sine oscillators (one per pitch band) whose
   // gains are driven every animation frame by reading the ink column
@@ -3520,6 +3642,10 @@ export default function Editor() {
               label: `SAUVER ANIMATION (SVG ANIMÉ)${animSuffix}`,
               action: animOk ? handleSaveAnimSvg : () => alert(`Export SVG animé désactivé au-dessus de ${ANIM_EXPORT_MAX_W}px de large (trop lourd). Repasse en AMIGA pour exporter.`),
             },
+            { label: "—", action: () => {} },
+            { label: "🎬 EXPORT VIDÉO + SON SPECTRO", action: () => exportVideo("spectro") },
+            { label: "🎬 EXPORT VIDÉO + SON DENSITÉ", action: () => exportVideo("density") },
+            { label: "🎬 EXPORT VIDÉO (MUET)", action: () => exportVideo("silent") },
           ];
         })()} />
         <input
