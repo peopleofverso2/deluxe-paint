@@ -852,6 +852,90 @@ export default function Editor() {
   const [splashOpen, setSplashOpen] = useState(true);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
 
+  // ---- TABLE (turntable / panoramic loop drawing modes) ----
+  // "turn": the canvas rotates under the brush like a record player —
+  //         hold the pencil still and it draws arcs/spirals.
+  // "pan":  the canvas scrolls horizontally and wraps — strokes wrap
+  //         around the seam, ideal for seamless looping panoramas.
+  // Visual only: exports stay unrotated / unshifted.
+  const [spinMode, setSpinMode] = useState<"off" | "turn" | "pan">("off");
+  const spinModeRef = useRef(spinMode);
+  useEffect(() => { spinModeRef.current = spinMode; }, [spinMode]);
+  const [spinSpeed, setSpinSpeed] = useState(25);   // -100..100 (% of max)
+  const spinSpeedRef = useRef(spinSpeed);
+  useEffect(() => { spinSpeedRef.current = spinSpeed; }, [spinSpeed]);
+  const spinAngleRef = useRef(0);   // degrees (turn mode)
+  const panOffsetRef = useRef(0);   // canvas px (pan mode)
+  const canvasWrapRef = useRef<HTMLDivElement>(null);
+  // Raw client coords of the last pointer/touch event — the continuous-
+  // stamping RAF re-maps them through the live rotation/offset.
+  const lastClientRef = useRef<{ clientX: number; clientY: number } | null>(null);
+
+  // TABLE driver: one RAF that (a) advances the rotation / pan offset,
+  // (b) applies the visual (CSS rotate for turn — GPU-cheap; recomposite
+  // for pan), and (c) keeps the stroke flowing while the pointer is held
+  // still — because the canvas is moving underneath it (spin-art!).
+  useEffect(() => {
+    if (spinMode === "off") {
+      if (canvasWrapRef.current) canvasWrapRef.current.style.transform = "";
+      panOffsetRef.current = 0;
+      spinAngleRef.current = 0;
+      composite();
+      return;
+    }
+    let raf = 0;
+    let last = performance.now();
+    const loop = (now: number) => {
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      const sp = spinSpeedRef.current;
+      if (spinModeRef.current === "turn") {
+        // ±100% → ±240°/s (40 RPM max)
+        spinAngleRef.current = (spinAngleRef.current + sp * 2.4 * dt) % 360;
+        const wEl = canvasWrapRef.current;
+        if (wEl) wEl.style.transform = `rotate(${spinAngleRef.current}deg)`;
+      } else {
+        // ±100% → one full loop every 4 s
+        const W = canvasWRef.current;
+        panOffsetRef.current = (((panOffsetRef.current + (sp / 100) * (W / 4) * dt) % W) + W) % W;
+        scheduleComposite();
+      }
+      // Continuous stroke while pointer held (skip during move/paste drags)
+      if (drawingRef.current && lastClientRef.current && !movingRef.current && !pasteDragRef.current) {
+        const t = toolRef.current;
+        if (t === "pencil" || t === "eraser") {
+          const ctx = getCtx();
+          if (ctx) {
+            const pos = mapClientToCanvas(lastClientRef.current.clientX, lastClientRef.current.clientY);
+            const lastP = lastPosRef.current;
+            if (!lastP || lastP.x !== pos.x || lastP.y !== pos.y) {
+              const c = t === "eraser" ? bgColorRef.current : fgColorRef.current;
+              const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
+              lastAngleRef.current = stampLineWrapped(ctx, (lastP ?? pos).x, (lastP ?? pos).y, pos.x, pos.y, brushSizeRef.current, c, shape, lastAngleRef.current);
+              lastPosRef.current = pos;
+              saveLiveCanvas();
+            }
+          }
+        } else if (t === "stamp" && clipboardRef.current) {
+          const pos = mapClientToCanvas(lastClientRef.current.clientX, lastClientRef.current.clientY);
+          const cb = clipboardRef.current;
+          const lastS = lastStampPosRef.current;
+          const step = Math.max(8, Math.round(Math.max(cb.canvas.width, cb.canvas.height) * stampScaleRef.current * 0.6));
+          if (!lastS || Math.hypot(pos.x - lastS.x, pos.y - lastS.y) >= step) {
+            stampClipboardAt(pos.x, pos.y);
+            lastStampPosRef.current = pos;
+            saveLiveCanvas();
+          }
+        }
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+    // canvasW/H in deps so getCtx's closure refreshes after a RÉSO switch
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spinMode, canvasW, canvasH]);
+
   // ---- Cloud project state (login + project manager) ----
   const [currentUser, setCurrentUser] = useState<ApiUser | null>(null);
   const [showLogin, setShowLogin] = useState(false);
@@ -1156,12 +1240,21 @@ export default function Editor() {
     dctx.fillStyle = "#FFFFFF";
     dctx.fillRect(0, 0, canvasW, canvasH);
     const f = currentFrameRef.current;
+    // PANO mode: the view scrolls by panOffset and wraps — draw each layer
+    // twice (shifted + the wrap-around copy). Exports are NOT affected
+    // (compositeFrameToCanvas has no offset).
+    const off = spinModeRef.current === "pan" ? Math.round(panOffsetRef.current) % canvasW : 0;
     for (const layer of layersRef.current) {
       if (!layer.visible) continue;
       const c = layer.frames[f];
       if (!c) continue;
       dctx.globalAlpha = layer.opacity;
-      dctx.drawImage(c, 0, 0);
+      if (off === 0) {
+        dctx.drawImage(c, 0, 0);
+      } else {
+        dctx.drawImage(c, -off, 0);
+        dctx.drawImage(c, canvasW - off, 0);
+      }
     }
     dctx.restore();
   }
@@ -1284,22 +1377,46 @@ export default function Editor() {
     bumpLayers();
   }
 
-  function getCanvasCoords(e: { clientX: number; clientY: number }): { x: number; y: number } {
+  // Map client (screen) coords → canvas pixel coords, accounting for the
+  // active TABLE mode:
+  // - turn: invert the CSS rotation around the canvas center (the AABB
+  //   center of a rotated element IS the rotation center, so it's stable)
+  // - pan:  add the wrap offset modulo canvas width
+  // Uses zoomRef / canvasW/H refs so the same math also works from RAF
+  // callbacks that outlive a render.
+  function mapClientToCanvas(clientX: number, clientY: number): { x: number; y: number } {
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
-    return {
-      x: Math.floor((e.clientX - rect.left) / zoom),
-      y: Math.floor((e.clientY - rect.top) / zoom),
-    };
+    const z = zoomRef.current;
+    const mode = spinModeRef.current;
+    if (mode === "turn") {
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const a = (-spinAngleRef.current * Math.PI) / 180;
+      const dx = clientX - cx;
+      const dy = clientY - cy;
+      const ux = dx * Math.cos(a) - dy * Math.sin(a);
+      const uy = dx * Math.sin(a) + dy * Math.cos(a);
+      return {
+        x: Math.floor(ux / z + canvasWRef.current / 2),
+        y: Math.floor(uy / z + canvasHRef.current / 2),
+      };
+    }
+    let x = Math.floor((clientX - rect.left) / z);
+    const y = Math.floor((clientY - rect.top) / z);
+    if (mode === "pan") {
+      const w = canvasWRef.current;
+      x = (((x + Math.round(panOffsetRef.current)) % w) + w) % w;
+    }
+    return { x, y };
+  }
+
+  function getCanvasCoords(e: { clientX: number; clientY: number }): { x: number; y: number } {
+    return mapClientToCanvas(e.clientX, e.clientY);
   }
 
   function getTouchCoords(touch: Touch): { x: number; y: number } {
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: Math.floor((touch.clientX - rect.left) / zoom),
-      y: Math.floor((touch.clientY - rect.top) / zoom),
-    };
+    return mapClientToCanvas(touch.clientX, touch.clientY);
   }
 
   // Layer-aware shims for the old per-frame functions. saveCurrentFrame
@@ -1574,6 +1691,7 @@ export default function Editor() {
     drawingRef.current = true;
     startPosRef.current = pos;
     lastPosRef.current = pos;
+    lastClientRef.current = { clientX: e.clientX, clientY: e.clientY };
 
     const ctx = getCtx();
     if (!ctx) return;
@@ -1583,7 +1701,7 @@ export default function Editor() {
       const c = tool === "eraser" ? bgColor : color;
       // Eraser always uses a plain square; brush shapes are for the pencil.
       const shape: BrushShape = tool === "eraser" ? "square" : brushShape;
-      stampBrush(ctx, pos.x, pos.y, brushSize, c, shape, lastAngleRef.current);
+      stampBrushWrapped(ctx, pos.x, pos.y, brushSize, c, shape, lastAngleRef.current);
       saveLiveCanvas();
     } else if (tool === "fill") {
       pushUndo();
@@ -1636,6 +1754,7 @@ export default function Editor() {
     if (e.pointerType === "touch") return;
     const pos = getCanvasCoords(e);
     setMousePos(pos);
+    if (drawingRef.current) lastClientRef.current = { clientX: e.clientX, clientY: e.clientY };
     if (!drawingRef.current) return;
     // Paste-float drag — update its position
     if (pasteDragRef.current && pasteFloatRef.current) {
@@ -1667,7 +1786,7 @@ export default function Editor() {
       const shape: BrushShape = tool === "eraser" ? "square" : brushShape;
       let prev = lastPosRef.current ?? positions[0];
       for (const p of positions) {
-        lastAngleRef.current = stampLine(ctx, prev.x, prev.y, p.x, p.y, brushSize, c, shape, lastAngleRef.current);
+        lastAngleRef.current = stampLineWrapped(ctx, prev.x, prev.y, p.x, p.y, brushSize, c, shape, lastAngleRef.current);
         prev = p;
       }
       lastPosRef.current = prev;
@@ -1731,6 +1850,7 @@ export default function Editor() {
     if (e.pointerType === "touch") return;
     if (!drawingRef.current) return;
     drawingRef.current = false;
+    lastClientRef.current = null;
     const pos = getCanvasCoords(e);
     // Paste-float drag: end the drag but keep the float parked (not yet committed)
     if (pasteDragRef.current) {
@@ -1813,6 +1933,9 @@ export default function Editor() {
 
   const onMouseLeave = useCallback(() => {
     setMousePos(null);
+    // Stop the continuous-stamp RAF from drawing with a stale position
+    // once the pointer has left the canvas.
+    lastClientRef.current = null;
   }, []);
 
   // Touch events — attached imperatively so we can use passive:false
@@ -2013,6 +2136,7 @@ export default function Editor() {
       drawingRef.current = true;
       startPosRef.current = pos;
       lastPosRef.current = pos;
+      lastClientRef.current = { clientX: touch.clientX, clientY: touch.clientY };
       setMousePos(pos);
       const ctx = getCtx();
       if (!ctx) return;
@@ -2022,7 +2146,7 @@ export default function Editor() {
         pushUndo();
         const c = t === "eraser" ? bgColorRef.current : color;
         const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
-        stampBrush(ctx, pos.x, pos.y, brushSizeRef.current, c, shape, lastAngleRef.current);
+        stampBrushWrapped(ctx, pos.x, pos.y, brushSizeRef.current, c, shape, lastAngleRef.current);
         composite();
       } else if (t === "fill") {
         pushUndo();
@@ -2073,7 +2197,12 @@ export default function Editor() {
       if (!touch) return;
       const pos = getTouchPos(touch);
       setMousePos(pos);
-      lastPosRef.current = pos; // tracked so touchEnd has a final position for move
+      lastClientRef.current = { clientX: touch.clientX, clientY: touch.clientY };
+      // Capture the previous position BEFORE overwriting — the pencil
+      // branch needs it to draw a continuous segment (was a bug: the
+      // overwrite happened first, collapsing strokes to dots).
+      const prevPos = lastPosRef.current;
+      lastPosRef.current = pos; // touchEnd uses this as the final position for move-commit
       if (pasteDragRef.current && pasteFloatRef.current) {
         const d = pasteDragRef.current;
         const f = pasteFloatRef.current;
@@ -2089,11 +2218,10 @@ export default function Editor() {
       const sz = brushSizeRef.current;
       const al = aliasedRef.current;
       if (t === "pencil" || t === "eraser") {
-        const last = lastPosRef.current ?? pos;
+        const last = prevPos ?? pos;
         const c = t === "eraser" ? bgColorRef.current : color;
         const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
-        lastAngleRef.current = stampLine(ctx, last.x, last.y, pos.x, pos.y, sz, c, shape, lastAngleRef.current);
-        lastPosRef.current = pos;
+        lastAngleRef.current = stampLineWrapped(ctx, last.x, last.y, pos.x, pos.y, sz, c, shape, lastAngleRef.current);
         composite();
       } else if (t === "stamp") {
         const cb = clipboardRef.current;
@@ -2122,6 +2250,7 @@ export default function Editor() {
       if (!drawingRef.current) return;
       e.preventDefault();
       drawingRef.current = false;
+      lastClientRef.current = null;
       if (pasteDragRef.current) { pasteDragRef.current = null; return; }
       if (movingRef.current) {
         const pos = lastPosRef.current ?? startPosRef.current ?? { x: 0, y: 0 };
@@ -2434,7 +2563,9 @@ export default function Editor() {
   }
 
   // Stamp the clipboard (rect or lasso copy) centered at (x, y) on the
-  // active layer's current frame. Honors stampScale.
+  // active layer's current frame. Honors stampScale. In PANO mode also
+  // stamps the two wrap ghosts at x ± canvasW so marks crossing the seam
+  // reappear on the other side.
   function stampClipboardAt(x: number, y: number) {
     const cb = clipboardRef.current;
     if (!cb) return false;
@@ -2445,9 +2576,42 @@ export default function Editor() {
     const h = Math.max(1, Math.round(cb.canvas.height * s));
     ctx.save();
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(cb.canvas, Math.round(x - w / 2), Math.round(y - h / 2), w, h);
+    const draw = (px: number) => ctx.drawImage(cb.canvas, Math.round(px - w / 2), Math.round(y - h / 2), w, h);
+    draw(x);
+    if (spinModeRef.current === "pan") {
+      const W = canvasWRef.current;
+      draw(x - W);
+      draw(x + W);
+    }
     ctx.restore();
     return true;
+  }
+
+  // Seam-aware variants used by pencil / eraser. In PANO mode, strokes are
+  // repeated at x ± canvasW so they tile seamlessly; segments that jump
+  // across the wrap (offset rollover) take the short path through the seam
+  // instead of streaking across the whole canvas.
+  function stampBrushWrapped(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color: string, shape: BrushShape, angle: number) {
+    stampBrush(ctx, x, y, size, color, shape, angle);
+    if (spinModeRef.current === "pan") {
+      const W = canvasWRef.current;
+      stampBrush(ctx, x - W, y, size, color, shape, angle);
+      stampBrush(ctx, x + W, y, size, color, shape, angle);
+    }
+  }
+
+  function stampLineWrapped(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, size: number, color: string, shape: BrushShape, fallbackAngle: number): number {
+    if (spinModeRef.current === "pan") {
+      const W = canvasWRef.current;
+      // Take the short way around the seam when the segment wrapped
+      if (x1 - x0 > W / 2) x1 -= W;
+      else if (x0 - x1 > W / 2) x1 += W;
+      const a = stampLine(ctx, x0, y0, x1, y1, size, color, shape, fallbackAngle);
+      stampLine(ctx, x0 - W, y0, x1 - W, y1, size, color, shape, fallbackAngle);
+      stampLine(ctx, x0 + W, y0, x1 + W, y1, size, color, shape, fallbackAngle);
+      return a;
+    }
+    return stampLine(ctx, x0, y0, x1, y1, size, color, shape, fallbackAngle);
   }
 
   function cancelPasteFloat() {
@@ -3225,8 +3389,8 @@ export default function Editor() {
         </div>
 
         {/* CANVAS AREA */}
-        <div ref={canvasAreaRef} style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", background: t.canvasBg, position: "relative" }}>
-          <div style={{ position: "relative", margin: 16, display: "inline-block" }}>
+        <div ref={canvasAreaRef} style={{ flex: 1, overflow: spinMode === "turn" ? "hidden" : "auto", display: "flex", alignItems: "center", justifyContent: "center", background: t.canvasBg, position: "relative" }}>
+          <div ref={canvasWrapRef} style={{ position: "relative", margin: 16, display: "inline-block", transformOrigin: "center center", willChange: spinMode === "turn" ? "transform" : undefined }}>
             <canvas
               ref={canvasRef}
               width={canvasW}
@@ -3529,7 +3693,7 @@ export default function Editor() {
       {/* SCRATCH / SCRUB PANEL — drag the slider to "scratch" the animation;
           if REC is on, this scratching is baked into the recorded video. */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={{ color: t.panelText, fontSize: 14, fontWeight: "bold", minWidth: 70 }}>SCRATCH :</span>
           <button
             className="amiga-button"
@@ -3568,6 +3732,54 @@ export default function Editor() {
           <span style={{ color: t.panelText, fontSize: 12, minWidth: 80, fontVariantNumeric: "tabular-nums" }}>
             {String(currentFrame + 1).padStart(3, "0")} / {String(frameCount).padStart(3, "0")}
           </span>
+
+          {/* TABLE — turntable / pano-loop drawing modes */}
+          <span style={{ color: t.panelText, fontSize: 14, fontWeight: "bold", marginLeft: 12 }}>TABLE :</span>
+          <button
+            className="amiga-button"
+            data-active={spinMode === "off"}
+            onClick={() => setSpinMode("off")}
+            title="Canvas fixe (normal)"
+            style={{ padding: "2px 8px", color: t.panelText }}
+          >FIXE</button>
+          <button
+            className="amiga-button"
+            data-active={spinMode === "turn"}
+            onClick={() => setSpinMode("turn")}
+            title="Le canvas tourne comme une platine vinyle — pinceau immobile = spirales (spin art). REC capture le canvas non-tourné."
+            style={{ padding: "2px 8px", color: t.panelText }}
+          >⟳ PLATINE</button>
+          <button
+            className="amiga-button"
+            data-active={spinMode === "pan"}
+            onClick={() => {
+              // The selection/paste overlays don't track the pan offset —
+              // clear them so the marquee can't end up visually desynced.
+              setSelection(null);
+              if (pasteFloatRef.current) cancelPasteFloat();
+              setSpinMode("pan");
+            }}
+            title="Le canvas défile en boucle horizontale — les traits se recousent au bord (panorama sans couture)"
+            style={{ padding: "2px 8px", color: t.panelText }}
+          >⇄ PANO</button>
+          {spinMode !== "off" && (
+            <>
+              <input
+                type="range"
+                min={-100}
+                max={100}
+                value={spinSpeed}
+                onChange={e => setSpinSpeed(Number(e.target.value))}
+                style={{ width: 90, accentColor: t.accent }}
+                title="Vitesse (négatif = sens inverse)"
+              />
+              <span style={{ color: t.panelText, fontSize: 12, minWidth: 70, fontVariantNumeric: "tabular-nums" }}>
+                {spinMode === "turn"
+                  ? `${(spinSpeed * 0.4).toFixed(1)} RPM`
+                  : spinSpeed === 0 ? "pause" : `${(400 / Math.abs(spinSpeed)).toFixed(1)}s/boucle`}
+              </span>
+            </>
+          )}
         </div>
       </div>
 
