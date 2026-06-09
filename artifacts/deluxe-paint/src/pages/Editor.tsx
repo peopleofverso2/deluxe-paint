@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { GIFEncoder, quantize, applyPalette } from "gifenc";
 import { api, ApiError, type ApiUser, type ProjectListItem } from "@/lib/api";
+import { gridFromCanvas, synthSpectro, synthDensity, encodeWav, type OpticalMode } from "@/lib/opticalSound";
 
 type Tool =
   | "pencil"
@@ -895,6 +896,62 @@ export default function Editor() {
   // strokes so slow speeds don't recomposite 60×/s for identical pixels.
   const lastPanDrawnRef = useRef(-1);
   const panDirtyRef = useRef(false);
+
+  // ---- SON OPTIQUE (optical sound) ----
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioSrcRef = useRef<AudioBufferSourceNode | null>(null);
+
+  function stopOpticalSound() {
+    try { audioSrcRef.current?.stop(); } catch { /* already stopped */ }
+    audioSrcRef.current = null;
+  }
+
+  // Read every frame's composite into an analysis grid and synthesize.
+  // SPECTRO reads a 128×64 grid (64 log-pitch bands); DENSITY reads
+  // 512×16 (temporal detail matters, rows just get averaged anyway).
+  function buildOpticalSamples(mode: OpticalMode): { samples: Float32Array; sampleRate: number } {
+    const n = frameCountOf();
+    const frameDur = 1 / Math.max(1, fps);
+    const cols = mode === "spectro" ? 128 : 512;
+    const rows = mode === "spectro" ? 64 : 16;
+    const grids = [];
+    for (let i = 0; i < n; i++) {
+      grids.push(gridFromCanvas(compositeFrameToCanvas(i), cols, rows));
+    }
+    const sampleRate = 44100;
+    const samples = mode === "spectro"
+      ? synthSpectro(grids, frameDur, sampleRate)
+      : synthDensity(grids, frameDur, sampleRate);
+    return { samples, sampleRate };
+  }
+
+  function playOpticalSound(mode: OpticalMode) {
+    stopOpticalSound();
+    const { samples, sampleRate } = buildOpticalSamples(mode);
+    const ctx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
+    void ctx.resume(); // menu click = user gesture, resume is allowed
+    const buf = ctx.createBuffer(1, samples.length, sampleRate);
+    // Re-wrap to satisfy TS's Float32Array<ArrayBuffer> requirement
+    buf.copyToChannel(new Float32Array(samples), 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = looping;
+    src.connect(ctx.destination);
+    src.start();
+    audioSrcRef.current = src;
+  }
+
+  function exportOpticalWav(mode: OpticalMode) {
+    const { samples, sampleRate } = buildOpticalSamples(mode);
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    downloadBlob(encodeWav(samples, sampleRate), `dpaint-son-optique-${mode}-${ts}.wav`);
+  }
+
+  // Stop audio + close the context on unmount
+  useEffect(() => () => {
+    try { audioSrcRef.current?.stop(); } catch { /* noop */ }
+    void audioCtxRef.current?.close();
+  }, []);
 
   // TABLE driver: one RAF that (a) advances the rotation / pan offset,
   // (b) applies the visual (CSS rotate for turn — GPU-cheap; recomposite
@@ -3375,6 +3432,14 @@ export default function Editor() {
           label: `${p.label} (${p.colors.length})${p.id === paletteId ? " ✓" : ""}`,
           action: () => setPaletteId(p.id),
         }))} />
+        <MenuDropdown label="SON" items={[
+          { label: "▶ JOUER — SPECTRO (image = spectrogramme)", action: () => playOpticalSound("spectro") },
+          { label: "▶ JOUER — DENSITÉ (piste optique McLaren)", action: () => playOpticalSound("density") },
+          { label: "■ STOP", action: stopOpticalSound },
+          { label: "—", action: () => {} },
+          { label: "⬇ EXPORT WAV — SPECTRO", action: () => exportOpticalWav("spectro") },
+          { label: "⬇ EXPORT WAV — DENSITÉ", action: () => exportOpticalWav("density") },
+        ]} />
         <button
           className="amiga-button"
           onClick={() => setTheme(theme === "light" ? "night" : "light")}
