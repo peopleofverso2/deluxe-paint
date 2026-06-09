@@ -890,6 +890,11 @@ export default function Editor() {
   // Rotation angle at the last stamp — lets the RAF subdivide the arc
   // travelled since then into small chords (smooth spirals at high RPM).
   const lastStampAngleRef = useRef<number>(0);
+  // PANO repaint gating: the offset advances fractionally but only integer
+  // changes are visible. Track the last drawn offset + a dirty flag set by
+  // strokes so slow speeds don't recomposite 60×/s for identical pixels.
+  const lastPanDrawnRef = useRef(-1);
+  const panDirtyRef = useRef(false);
 
   // TABLE driver: one RAF that (a) advances the rotation / pan offset,
   // (b) applies the visual (CSS rotate for turn — GPU-cheap; recomposite
@@ -918,10 +923,15 @@ export default function Editor() {
         // ±100% → one full loop every 4 s
         const W = canvasWRef.current;
         panOffsetRef.current = (((panOffsetRef.current + (sp / 100) * (W / 4) * dt) % W) + W) % W;
-        // Composite NOW — we're already inside a RAF callback. Routing
-        // through scheduleComposite would defer to the NEXT frame (one
-        // frame of latency) and occasionally double-composite.
-        composite();
+        // Composite NOW (we're already in a RAF) — but only when the
+        // visible integer offset moved or a stroke dirtied the frame.
+        // At slow speeds this skips most ticks entirely.
+        const rounded = Math.round(panOffsetRef.current) % W;
+        if (rounded !== lastPanDrawnRef.current || panDirtyRef.current) {
+          composite();
+          lastPanDrawnRef.current = rounded;
+          panDirtyRef.current = false;
+        }
       }
       // Continuous stroke while pointer held (skip during move/paste drags)
       if (drawingRef.current && lastClientRef.current && !movingRef.current && !pasteDragRef.current) {
@@ -1121,7 +1131,7 @@ export default function Editor() {
   const clipboardRef = useRef<{ canvas: HTMLCanvasElement; x: number; y: number } | null>(null);
   // Undo / redo — per-frame ImageData snapshots, trimmed to a memory
   // budget so a 4K canvas (33MB per snapshot) doesn't OOM the tab.
-  const historyRef = useRef<Map<number, { undo: ImageData[]; redo: ImageData[] }>>(new Map());
+  const historyRef = useRef<Map<number, { undo: HTMLCanvasElement[]; redo: HTMLCanvasElement[] }>>(new Map());
   const UNDO_MEM_BUDGET = 100 * 1024 * 1024; // 100 MB per frame
   const [historyTick, setHistoryTick] = useState(0); // bumps to re-enable/disable buttons
   const [clipboardKey, setClipboardKey] = useState(0); // bumps to re-render the COLLER button enabled state
@@ -1312,15 +1322,18 @@ export default function Editor() {
     dctx.restore();
   }
 
-  // After every React render, recomposite — mobile browsers wipe the
-  // displayed canvas when its width/height attributes change, and the
-  // layer offscreens (which AREN'T in the DOM) keep their pixels.
-  // Exception: in PANO mode the spin RAF already repaints every frame —
-  // the duplicate here would double the per-render cost for nothing.
+  // Recomposite when something that affects the displayed pixels changes.
+  // This used to run after EVERY render (and mousePos updates render at up
+  // to 60 Hz), which at 4K meant 33 MB of pixel writes per hover event.
+  // The canvas element is only wiped by the browser when its width/height
+  // attributes change — covered by the canvasW/canvasH deps; pixel-content
+  // changes during strokes go through saveLiveCanvas → scheduleComposite.
+  // PANO mode is excluded: its RAF already repaints every frame.
   useLayoutEffect(() => {
     if (spinModeRef.current === "pan") return;
     composite();
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentFrame, layerVersion, canvasW, canvasH, zoom, fit]);
 
   // Composite an arbitrary frame index to a fresh offscreen canvas
   // (used by exports / thumbnails — anything outside the live display).
@@ -1346,33 +1359,42 @@ export default function Editor() {
     return c.getContext("2d")!.getImageData(0, 0, c.width, c.height);
   }
 
-  // Thumbnail cache — keep composites around so a PLAY tick doesn't have
-  // to recompute every frame × every layer (otherwise at HD/4K the strip
-  // alone burns tens of MB/s of work).
+  // Thumbnail cache — tiny 48×30 canvases built by drawing each visible
+  // layer DIRECTLY at thumbnail scale (GPU drawImage). The previous
+  // implementation materialized a full-resolution ImageData per frame per
+  // render — at 4K that's a 33 MB GPU→CPU readback × frameCount × 60 Hz,
+  // the single biggest source of instability on big canvases.
   //
-  // Validity rules:
-  //   - Only used WHILE playing (during edit the thumb strip is always
-  //     fresh so the user sees their work immediately).
-  //   - Per-frame invalidation in saveLiveCanvas() drops the entry for
-  //     the frame the user just modified.
-  //   - Structural changes (layers, frame count, dims) wipe the whole
-  //     cache via this effect.
-  //   - startPlayback() also wipes defensively so the very first PLAY
-  //     render is guaranteed fresh.
-  const thumbCacheRef = useRef<Map<number, ImageData>>(new Map());
+  // Validity:
+  //   - Per-frame invalidation in saveLiveCanvas() (frame just edited)
+  //   - Structural changes (layers, frame count, dims) wipe the cache
+  //   - Cache is used during edit AND playback — invalidation keeps it
+  //     honest, and a 48×30 rebuild costs microseconds anyway
+  const THUMB_W = 48, THUMB_H = 30;
+  const thumbCacheRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
   useEffect(() => {
     thumbCacheRef.current.clear();
   }, [layerVersion, frameCount, canvasW, canvasH]);
-  function getThumbForRender(i: number): ImageData {
-    if (playing) {
-      const cached = thumbCacheRef.current.get(i);
-      if (cached) return cached;
-      const fresh = compositeFrameToImageData(i);
-      thumbCacheRef.current.set(i, fresh);
-      return fresh;
+  function getThumbForRender(i: number): HTMLCanvasElement {
+    const cached = thumbCacheRef.current.get(i);
+    if (cached) return cached;
+    const c = document.createElement("canvas");
+    c.width = THUMB_W;
+    c.height = THUMB_H;
+    const cx = c.getContext("2d")!;
+    cx.imageSmoothingEnabled = false;
+    cx.fillStyle = "#FFFFFF";
+    cx.fillRect(0, 0, THUMB_W, THUMB_H);
+    for (const layer of layersRef.current) {
+      if (!layer.visible) continue;
+      const lc = layer.frames[i];
+      if (!lc) continue;
+      cx.globalAlpha = layer.opacity;
+      cx.drawImage(lc, 0, 0, THUMB_W, THUMB_H);
     }
-    // Not playing → always fresh so edits show up in the strip immediately
-    return compositeFrameToImageData(i);
+    cx.globalAlpha = 1;
+    thumbCacheRef.current.set(i, c);
+    return c;
   }
   // Project-wide frame count is derived from the first layer's frames.
   function frameCountOf() { return layersRef.current[0]?.frames.length ?? 1; }
@@ -1495,9 +1517,13 @@ export default function Editor() {
     });
   }
   function saveLiveCanvas() {
-    // In PANO mode the spin RAF already composites every frame — don't
-    // queue a duplicate.
-    if (spinModeRef.current !== "pan") scheduleComposite();
+    // In PANO mode the spin RAF owns repainting — flag the stroke so its
+    // next tick composites even if the offset hasn't visibly moved.
+    if (spinModeRef.current === "pan") {
+      panDirtyRef.current = true;
+    } else {
+      scheduleComposite();
+    }
     // Invalidate the thumbnail cache for the frame we just modified so
     // the next render (or the next playback start) recomputes it.
     thumbCacheRef.current.delete(currentFrameRef.current);
@@ -2530,51 +2556,64 @@ export default function Editor() {
     return h;
   }
 
-  // Capture current canvas state to the current-frame's undo stack. Trims
-  // by memory budget. Clears redo (new action invalidates the redo line).
+  // GPU-side snapshot of the active layer's current frame. drawImage
+  // canvas→canvas stays on the GPU — unlike getImageData, which forces a
+  // full GPU→CPU readback (33 MB + pipeline stall at 4K) and made every
+  // stroke START hitch on big canvases.
+  function snapshotActiveLayer(): HTMLCanvasElement | null {
+    const src = getActiveCanvas();
+    if (!src) return null;
+    const c = makeLayerCanvas(src.width, src.height);
+    c.getContext("2d")!.drawImage(src, 0, 0);
+    return c;
+  }
+  const canvasBytes = (c: HTMLCanvasElement) => c.width * c.height * 4;
+
+  // Capture current state onto the undo stack. Trims by memory budget.
+  // Clears redo (a new action invalidates the redo line).
   function pushUndo() {
-    const ctx = getCtx();
-    if (!ctx) return;
-    const idx = currentFrameRef.current;
-    const h = getHist(idx);
-    const snap = ctx.getImageData(0, 0, canvasW, canvasH);
+    const snap = snapshotActiveLayer();
+    if (!snap) return;
+    const h = getHist(currentFrameRef.current);
     h.undo.push(snap);
-    let total = h.undo.reduce((s, d) => s + d.data.byteLength, 0);
+    let total = h.undo.reduce((s, c) => s + canvasBytes(c), 0);
     while (total > UNDO_MEM_BUDGET && h.undo.length > 1) {
       const drop = h.undo.shift()!;
-      total -= drop.data.byteLength;
+      total -= canvasBytes(drop);
     }
     h.redo = [];
     setHistoryTick(k => k + 1);
   }
 
   function undo() {
-    const idx = currentFrameRef.current;
-    const h = getHist(idx);
+    const h = getHist(currentFrameRef.current);
     const prev = h.undo.pop();
     if (!prev) return;
     const ctx = getCtx();
     if (!ctx) return;
-    // Snapshots are tied to the canvas dimensions captured at that time;
-    // if they no longer match (e.g. after a RÉSO switch since), bail.
+    // Snapshots are tied to the dimensions captured at that time; bail if
+    // they no longer match (e.g. after a RÉSO switch).
     if (prev.width !== canvasW || prev.height !== canvasH) return;
-    h.redo.push(ctx.getImageData(0, 0, canvasW, canvasH));
-    ctx.putImageData(prev, 0, 0);
+    const cur = snapshotActiveLayer();
+    if (cur) h.redo.push(cur);
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.drawImage(prev, 0, 0);
     saveLiveCanvas();
     saveCurrentFrame();
     setHistoryTick(k => k + 1);
   }
 
   function redo() {
-    const idx = currentFrameRef.current;
-    const h = getHist(idx);
+    const h = getHist(currentFrameRef.current);
     const next = h.redo.pop();
     if (!next) return;
     const ctx = getCtx();
     if (!ctx) return;
     if (next.width !== canvasW || next.height !== canvasH) return;
-    h.undo.push(ctx.getImageData(0, 0, canvasW, canvasH));
-    ctx.putImageData(next, 0, 0);
+    const cur = snapshotActiveLayer();
+    if (cur) h.undo.push(cur);
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.drawImage(next, 0, 0);
     saveLiveCanvas();
     saveCurrentFrame();
     setHistoryTick(k => k + 1);
@@ -4056,7 +4095,8 @@ export default function Editor() {
 function FrameThumb({ index, current, frameData, onClick }: {
   index: number;
   current: boolean;
-  frameData: ImageData | null;
+  // Pre-scaled 48×30 canvas from the parent's thumb cache (no readbacks)
+  frameData: HTMLCanvasElement | null;
   onClick: () => void;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -4065,16 +4105,7 @@ function FrameThumb({ index, current, frameData, onClick }: {
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
     if (frameData) {
-      // Scale down the ImageData using its own dims (FrameThumb is reused
-      // across resolutions; the parent Editor's canvas size lives in state
-      // that isn't in scope here).
-      const offscreen = document.createElement("canvas");
-      offscreen.width = frameData.width;
-      offscreen.height = frameData.height;
-      const ctx2 = offscreen.getContext("2d")!;
-      ctx2.imageSmoothingEnabled = false;
-      ctx2.putImageData(frameData, 0, 0);
-      ctx.drawImage(offscreen, 0, 0, 48, 30);
+      ctx.drawImage(frameData, 0, 0);
     } else {
       ctx.fillStyle = "#FFFFFF";
       ctx.fillRect(0, 0, 48, 30);
