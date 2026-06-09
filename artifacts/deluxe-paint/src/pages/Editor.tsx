@@ -1028,6 +1028,14 @@ export default function Editor() {
   const activePalette = PALETTES.find(p => p.id === paletteId) ?? PALETTES[0];
   const t = THEMES[theme];
 
+  // Touch-friendly sizing: on coarse pointers (iPad, phones) the 16px
+  // palette swatches are far below the ~44pt touch-target guideline.
+  const isCoarsePointer = useMemo(
+    () => typeof window !== "undefined" && (window.matchMedia?.("(pointer: coarse)").matches ?? false),
+    [],
+  );
+  const swatchSize = isCoarsePointer ? 30 : 16;
+
   // Text-tool state (tampon / stamp mode)
   const [textInput, setTextInput] = useState("TEXTE");
   const [textFontIdx, setTextFontIdx] = useState(0);
@@ -3493,10 +3501,10 @@ export default function Editor() {
           </div>
           {/* Color swatches */}
           <div style={{ marginTop: 8, borderTop: `1px solid ${t.border}`, paddingTop: 4 }}>
-            <div style={{ position: "relative", width: 46, height: 36 }}>
-              <div style={{ position: "absolute", right: 0, bottom: 0, width: 24, height: 24, background: bgColor, border: `1px solid ${t.border}`, cursor: "pointer" }}
+            <div style={{ position: "relative", width: isCoarsePointer ? 46 : 46, height: isCoarsePointer ? 44 : 36 }}>
+              <div style={{ position: "absolute", right: 0, bottom: 0, width: isCoarsePointer ? 30 : 24, height: isCoarsePointer ? 30 : 24, background: bgColor, border: `1px solid ${t.border}`, cursor: "pointer" }}
                 title="Couleur de fond (clic droit)" />
-              <div style={{ position: "absolute", left: 0, top: 0, width: 24, height: 24, background: fgColor, border: `2px solid ${t.accent}`, cursor: "pointer" }}
+              <div style={{ position: "absolute", left: 0, top: 0, width: isCoarsePointer ? 30 : 24, height: isCoarsePointer ? 30 : 24, background: fgColor, border: `2px solid ${t.accent}`, cursor: "pointer" }}
                 title="Couleur principale" />
             </div>
           </div>
@@ -4048,16 +4056,16 @@ export default function Editor() {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: `repeat(${activePalette.width}, 16px)`,
-                gap: 2,
+                gridTemplateColumns: `repeat(${activePalette.width}, ${swatchSize}px)`,
+                gap: isCoarsePointer ? 4 : 2,
               }}
             >
               {activePalette.colors.map((color, i) => (
                 <div
                   key={`${activePalette.id}-${i}-${color}`}
                   style={{
-                    width: 16,
-                    height: 16,
+                    width: swatchSize,
+                    height: swatchSize,
                     background: color,
                     border: fgColor === color ? `2px solid ${t.accent}` : bgColor === color ? "2px dashed " + t.accent : `1px solid ${t.border}`,
                     cursor: "pointer",
@@ -4081,9 +4089,9 @@ export default function Editor() {
           {/* FG/BG color display */}
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <div style={{ fontSize: 11, color: t.panelText }}>AVANT</div>
-            <div style={{ width: 32, height: 16, background: fgColor, border: `1px solid ${t.border}` }} />
+            <div style={{ width: isCoarsePointer ? 44 : 32, height: isCoarsePointer ? 24 : 16, background: fgColor, border: `1px solid ${t.border}` }} />
             <div style={{ fontSize: 11, color: t.panelText }}>FOND</div>
-            <div style={{ width: 32, height: 16, background: bgColor, border: `1px solid ${t.border}` }} />
+            <div style={{ width: isCoarsePointer ? 44 : 32, height: isCoarsePointer ? 24 : 16, background: bgColor, border: `1px solid ${t.border}` }} />
           </div>
         </div>
       </div>
