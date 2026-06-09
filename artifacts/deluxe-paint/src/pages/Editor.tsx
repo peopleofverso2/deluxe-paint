@@ -962,10 +962,14 @@ export default function Editor() {
   const exportingVideoRef = useRef(false);
 
   function pickRecorderMime(): string {
+    // webm+opus FIRST: it's the rock-solid MediaRecorder path on Chrome /
+    // Edge / Firefox. Safari doesn't support webm and falls through to the
+    // mp4 candidates. A worng-footed mp4 pick on Chrome was producing
+    // broken recordings.
     const candidates = [
-      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
       "video/webm;codecs=vp9,opus",
       "video/webm;codecs=vp8,opus",
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
       "video/mp4",
       "video/webm",
     ];
@@ -973,7 +977,7 @@ export default function Editor() {
     return candidates.find(m => MediaRecorder.isTypeSupported(m)) || "";
   }
 
-  function exportVideo(mode: OpticalMode | "silent") {
+  async function exportVideo(mode: OpticalMode | "silent") {
     if (recording) { alert("Arrête d'abord l'enregistrement ● REC."); return; }
     if (exportingVideoRef.current) { alert("Un export vidéo est déjà en cours."); return; }
     const n = frameCountOf();
@@ -1012,8 +1016,14 @@ export default function Editor() {
     drawFrameTo(0);
 
     const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
-    void actx.resume();
+    try { await actx.resume(); } catch { /* keep going — worst case silent track */ }
     const dest = actx.createMediaStreamDestination();
+    // Permanent silent feed so the audio track always produces samples,
+    // including in MUET mode (a data-less track stalls MediaRecorder).
+    const silence = actx.createConstantSource();
+    silence.offset.value = 0;
+    silence.connect(dest);
+    silence.start();
     let src: AudioBufferSourceNode | null = null;
     if (mode !== "silent") {
       const { samples, sampleRate } = buildOpticalSamples(mode);
@@ -1045,9 +1055,15 @@ export default function Editor() {
     const ext = actualMime.includes("mp4") ? "mp4" : "webm";
     const chunks: Blob[] = [];
     recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    recorder.onerror = (e) => {
+      const msg = (e as ErrorEvent).error?.message ?? "erreur inconnue";
+      alert("Erreur pendant l'export vidéo : " + msg);
+      try { recorder.stop(); } catch { /* noop */ }
+    };
     recorder.onstop = () => {
       videoStream.getTracks().forEach(t => t.stop());
       try { src?.stop(); } catch { /* noop */ }
+      try { silence.stop(); } catch { /* noop */ }
       const blob = new Blob(chunks, { type: actualMime });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `dpaint-video-${mode}-${ts}.${ext}`);
@@ -1920,7 +1936,7 @@ export default function Editor() {
   }, [fps, playDir, playSpeed]);
 
   // Video recording (magnétoscope) - records the canvas in real-time
-  function startRecording() {
+  async function startRecording() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     if (typeof (canvas as HTMLCanvasElement & { captureStream?: () => MediaStream }).captureStream !== "function") {
@@ -1929,37 +1945,39 @@ export default function Editor() {
     }
     const videoStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(30);
 
-    // AUDIO: route the optical-sound output into the recording. We create
-    // the audio tap (MediaStreamAudioDestinationNode) up-front so the
-    // recording has an audio track from t=0 — silent until the user hits
-    // SON ▶ JOUER, at which point playOpticalSound also connects to it.
-    const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
-    void actx.resume(); // REC click is a user gesture
-    if (!recAudioDestRef.current) recAudioDestRef.current = actx.createMediaStreamDestination();
-    const audioDest = recAudioDestRef.current;
-    // If a sound is ALREADY playing, tap it too (one-shot + live bank)
-    try { audioSrcRef.current?.connect(audioDest); } catch { /* already connected */ }
-    try { liveChainRef.current?.comp.connect(audioDest); } catch { /* already connected */ }
+    // AUDIO: route the optical-sound output into the recording. The tap
+    // (MediaStreamAudioDestinationNode) gives the recording an audio track
+    // from t=0. CRITICAL: a track from a SUSPENDED AudioContext produces
+    // no data and stalls MediaRecorder into empty/corrupt files — so we
+    // (a) await resume() and (b) keep a permanent silent ConstantSource
+    // connected so the track always has samples flowing, even before the
+    // user triggers SON ▶ JOUER.
+    let audioTracks: MediaStreamTrack[] = [];
+    try {
+      const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
+      await actx.resume(); // REC click is a user gesture — this resolves
+      if (!recAudioDestRef.current) {
+        recAudioDestRef.current = actx.createMediaStreamDestination();
+        const silence = actx.createConstantSource();
+        silence.offset.value = 0; // emits silent (zero) samples
+        silence.connect(recAudioDestRef.current);
+        silence.start();
+      }
+      const audioDest = recAudioDestRef.current;
+      // If a sound is ALREADY playing, tap it too (one-shot + live bank)
+      try { audioSrcRef.current?.connect(audioDest); } catch { /* already connected */ }
+      try { liveChainRef.current?.comp.connect(audioDest); } catch { /* already connected */ }
+      if (actx.state === "running") {
+        audioTracks = audioDest.stream.getAudioTracks();
+      }
+    } catch { /* audio unavailable → record video-only */ }
 
     const stream = new MediaStream([
       ...videoStream.getVideoTracks(),
-      ...audioDest.stream.getAudioTracks(),
+      ...audioTracks,
     ]);
 
-    // Audio-capable codec combos FIRST — a video-only `codecs=` value can
-    // make MediaRecorder drop or refuse the audio track.
-    const mimeCandidates = [
-      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/mp4",
-      "video/webm",
-      "video/mp4;codecs=avc1.42E01E",
-      "video/webm;codecs=vp9",
-    ];
-    const mimeType = typeof MediaRecorder !== "undefined"
-      ? (mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || "")
-      : "";
+    const mimeType = pickRecorderMime();
     let recorder: MediaRecorder;
     try {
       recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 128_000 } : undefined);
@@ -1968,6 +1986,11 @@ export default function Editor() {
       alert("Impossible de démarrer l'enregistrement: " + (err instanceof Error ? err.message : String(err)));
       return;
     }
+    recorder.onerror = (e) => {
+      const msg = (e as ErrorEvent).error?.message ?? "erreur inconnue";
+      alert("Erreur d'enregistrement : " + msg);
+      try { recorder.stop(); } catch { /* noop */ }
+    };
     const actualMime = recorder.mimeType || mimeType || "video/webm";
     const ext = actualMime.includes("mp4") ? "mp4" : "webm";
     recChunksRef.current = [];
