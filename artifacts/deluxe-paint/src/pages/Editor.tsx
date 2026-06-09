@@ -851,6 +851,23 @@ export default function Editor() {
   const [theme, setTheme] = useState<"light" | "night">("light");
   const [splashOpen, setSplashOpen] = useState(true);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+  // RAF-throttled mousePos: pointer events fire at 60-120 Hz and every
+  // setMousePos triggers a React render (whose layout-effect recomposites
+  // the whole canvas — 33 MB at 4K). Coalesce to ≤1 state update per frame.
+  const mousePosPendingRef = useRef<{ x: number; y: number } | null>(null);
+  const mousePosRafRef = useRef<number | null>(null);
+  function updateMousePos(pos: { x: number; y: number } | null) {
+    mousePosPendingRef.current = pos;
+    if (mousePosRafRef.current != null) return;
+    mousePosRafRef.current = requestAnimationFrame(() => {
+      mousePosRafRef.current = null;
+      setMousePos(prev => {
+        const next = mousePosPendingRef.current;
+        if (prev && next && prev.x === next.x && prev.y === next.y) return prev;
+        return next;
+      });
+    });
+  }
 
   // ---- TABLE (turntable / panoramic loop drawing modes) ----
   // "turn": the canvas rotates under the brush like a record player —
@@ -870,6 +887,9 @@ export default function Editor() {
   // Raw client coords of the last pointer/touch event — the continuous-
   // stamping RAF re-maps them through the live rotation/offset.
   const lastClientRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  // Rotation angle at the last stamp — lets the RAF subdivide the arc
+  // travelled since then into small chords (smooth spirals at high RPM).
+  const lastStampAngleRef = useRef<number>(0);
 
   // TABLE driver: one RAF that (a) advances the rotation / pan offset,
   // (b) applies the visual (CSS rotate for turn — GPU-cheap; recomposite
@@ -898,7 +918,10 @@ export default function Editor() {
         // ±100% → one full loop every 4 s
         const W = canvasWRef.current;
         panOffsetRef.current = (((panOffsetRef.current + (sp / 100) * (W / 4) * dt) % W) + W) % W;
-        scheduleComposite();
+        // Composite NOW — we're already inside a RAF callback. Routing
+        // through scheduleComposite would defer to the NEXT frame (one
+        // frame of latency) and occasionally double-composite.
+        composite();
       }
       // Continuous stroke while pointer held (skip during move/paste drags)
       if (drawingRef.current && lastClientRef.current && !movingRef.current && !pasteDragRef.current) {
@@ -906,14 +929,44 @@ export default function Editor() {
         if (t === "pencil" || t === "eraser") {
           const ctx = getCtx();
           if (ctx) {
-            const pos = mapClientToCanvas(lastClientRef.current.clientX, lastClientRef.current.clientY);
-            const lastP = lastPosRef.current;
-            if (!lastP || lastP.x !== pos.x || lastP.y !== pos.y) {
-              const c = t === "eraser" ? bgColorRef.current : fgColorRef.current;
-              const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
-              lastAngleRef.current = stampLineWrapped(ctx, (lastP ?? pos).x, (lastP ?? pos).y, pos.x, pos.y, brushSizeRef.current, c, shape, lastAngleRef.current);
-              lastPosRef.current = pos;
-              saveLiveCanvas();
+            const lc = lastClientRef.current;
+            const c = t === "eraser" ? bgColorRef.current : fgColorRef.current;
+            const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
+            const sz = brushSizeRef.current;
+            if (spinModeRef.current === "turn") {
+              // ARC SUBDIVISION: between two RAF ticks the canvas rotated
+              // by Δ degrees; a single chord between the two mapped points
+              // cuts across the arc and makes fast spirals polygonal.
+              // Sample the mapping at intermediate angles (≤2° steps) so
+              // the stroke follows the true circular path.
+              const curAngle = spinAngleRef.current;
+              let delta = curAngle - lastStampAngleRef.current;
+              delta = ((delta + 540) % 360) - 180; // normalize to [-180, 180]
+              const steps = Math.min(48, Math.max(1, Math.ceil(Math.abs(delta) / 2)));
+              let prev = lastPosRef.current ?? mapClientToCanvas(lc.clientX, lc.clientY, lastStampAngleRef.current);
+              let moved = false;
+              for (let i = 1; i <= steps; i++) {
+                const a = lastStampAngleRef.current + (delta * i) / steps;
+                const p = mapClientToCanvas(lc.clientX, lc.clientY, a);
+                if (p.x !== prev.x || p.y !== prev.y) {
+                  lastAngleRef.current = stampLineWrapped(ctx, prev.x, prev.y, p.x, p.y, sz, c, shape, lastAngleRef.current);
+                  prev = p;
+                  moved = true;
+                }
+              }
+              lastStampAngleRef.current = curAngle;
+              if (moved) {
+                lastPosRef.current = prev;
+                saveLiveCanvas();
+              }
+            } else {
+              const pos = mapClientToCanvas(lc.clientX, lc.clientY);
+              const lastP = lastPosRef.current;
+              if (!lastP || lastP.x !== pos.x || lastP.y !== pos.y) {
+                lastAngleRef.current = stampLineWrapped(ctx, (lastP ?? pos).x, (lastP ?? pos).y, pos.x, pos.y, sz, c, shape, lastAngleRef.current);
+                lastPosRef.current = pos;
+                saveLiveCanvas();
+              }
             }
           }
         } else if (t === "stamp" && clipboardRef.current) {
@@ -1262,7 +1315,10 @@ export default function Editor() {
   // After every React render, recomposite — mobile browsers wipe the
   // displayed canvas when its width/height attributes change, and the
   // layer offscreens (which AREN'T in the DOM) keep their pixels.
+  // Exception: in PANO mode the spin RAF already repaints every frame —
+  // the duplicate here would double the per-render cost for nothing.
   useLayoutEffect(() => {
+    if (spinModeRef.current === "pan") return;
     composite();
   });
 
@@ -1384,7 +1440,9 @@ export default function Editor() {
   // - pan:  add the wrap offset modulo canvas width
   // Uses zoomRef / canvasW/H refs so the same math also works from RAF
   // callbacks that outlive a render.
-  function mapClientToCanvas(clientX: number, clientY: number): { x: number; y: number } {
+  // angleDegOverride lets the turn-mode arc-subdivision sample the mapping
+  // at intermediate rotation angles between two RAF ticks.
+  function mapClientToCanvas(clientX: number, clientY: number, angleDegOverride?: number): { x: number; y: number } {
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
     const z = zoomRef.current;
@@ -1392,7 +1450,7 @@ export default function Editor() {
     if (mode === "turn") {
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
-      const a = (-spinAngleRef.current * Math.PI) / 180;
+      const a = (-(angleDegOverride ?? spinAngleRef.current) * Math.PI) / 180;
       const dx = clientX - cx;
       const dy = clientY - cy;
       const ux = dx * Math.cos(a) - dy * Math.sin(a);
@@ -1437,7 +1495,9 @@ export default function Editor() {
     });
   }
   function saveLiveCanvas() {
-    scheduleComposite();
+    // In PANO mode the spin RAF already composites every frame — don't
+    // queue a duplicate.
+    if (spinModeRef.current !== "pan") scheduleComposite();
     // Invalidate the thumbnail cache for the frame we just modified so
     // the next render (or the next playback start) recomputes it.
     thumbCacheRef.current.delete(currentFrameRef.current);
@@ -1692,6 +1752,7 @@ export default function Editor() {
     startPosRef.current = pos;
     lastPosRef.current = pos;
     lastClientRef.current = { clientX: e.clientX, clientY: e.clientY };
+    lastStampAngleRef.current = spinAngleRef.current;
 
     const ctx = getCtx();
     if (!ctx) return;
@@ -1753,7 +1814,7 @@ export default function Editor() {
   const onMouseMove = useCallback((e: React.PointerEvent) => {
     if (e.pointerType === "touch") return;
     const pos = getCanvasCoords(e);
-    setMousePos(pos);
+    updateMousePos(pos);
     if (drawingRef.current) lastClientRef.current = { clientX: e.clientX, clientY: e.clientY };
     if (!drawingRef.current) return;
     // Paste-float drag — update its position
@@ -1790,6 +1851,9 @@ export default function Editor() {
         prev = p;
       }
       lastPosRef.current = prev;
+      // The move handler just stamped up to the CURRENT rotation — reset
+      // the arc-subdivision baseline so the RAF doesn't re-cover it.
+      lastStampAngleRef.current = spinAngleRef.current;
       saveLiveCanvas();
     } else if (tool === "stamp") {
       const cb = clipboardRef.current;
@@ -2137,7 +2201,8 @@ export default function Editor() {
       startPosRef.current = pos;
       lastPosRef.current = pos;
       lastClientRef.current = { clientX: touch.clientX, clientY: touch.clientY };
-      setMousePos(pos);
+      lastStampAngleRef.current = spinAngleRef.current;
+      updateMousePos(pos);
       const ctx = getCtx();
       if (!ctx) return;
       const color = fgColorRef.current;
@@ -2196,7 +2261,7 @@ export default function Editor() {
       const touch = e.touches[0];
       if (!touch) return;
       const pos = getTouchPos(touch);
-      setMousePos(pos);
+      updateMousePos(pos);
       lastClientRef.current = { clientX: touch.clientX, clientY: touch.clientY };
       // Capture the previous position BEFORE overwriting — the pencil
       // branch needs it to draw a continuous segment (was a bug: the
@@ -2222,6 +2287,7 @@ export default function Editor() {
         const c = t === "eraser" ? bgColorRef.current : color;
         const shape: BrushShape = t === "eraser" ? "square" : brushShapeRef.current;
         lastAngleRef.current = stampLineWrapped(ctx, last.x, last.y, pos.x, pos.y, sz, c, shape, lastAngleRef.current);
+        lastStampAngleRef.current = spinAngleRef.current;
         composite();
       } else if (t === "stamp") {
         const cb = clipboardRef.current;
@@ -2580,8 +2646,9 @@ export default function Editor() {
     draw(x);
     if (spinModeRef.current === "pan") {
       const W = canvasWRef.current;
-      draw(x - W);
-      draw(x + W);
+      // Ghosts only when the stamp can straddle the seam
+      if (x - w / 2 <= 0) draw(x + W);
+      if (x + w / 2 >= W) draw(x - W);
     }
     ctx.restore();
     return true;
@@ -2595,8 +2662,10 @@ export default function Editor() {
     stampBrush(ctx, x, y, size, color, shape, angle);
     if (spinModeRef.current === "pan") {
       const W = canvasWRef.current;
-      stampBrush(ctx, x - W, y, size, color, shape, angle);
-      stampBrush(ctx, x + W, y, size, color, shape, angle);
+      // Ghost copies only when the mark can actually reach across the seam
+      const margin = size * 2 + 4;
+      if (x <= margin) stampBrush(ctx, x + W, y, size, color, shape, angle);
+      if (x >= W - margin) stampBrush(ctx, x - W, y, size, color, shape, angle);
     }
   }
 
@@ -2607,8 +2676,14 @@ export default function Editor() {
       if (x1 - x0 > W / 2) x1 -= W;
       else if (x0 - x1 > W / 2) x1 += W;
       const a = stampLine(ctx, x0, y0, x1, y1, size, color, shape, fallbackAngle);
-      stampLine(ctx, x0 - W, y0, x1 - W, y1, size, color, shape, fallbackAngle);
-      stampLine(ctx, x0 + W, y0, x1 + W, y1, size, color, shape, fallbackAngle);
+      // Ghost copies only when the segment's x-range gets near an edge —
+      // unconditional triple-stamping costs 3× draw for nothing in the
+      // middle of the canvas.
+      const margin = size * 2 + 4;
+      const minX = Math.min(x0, x1);
+      const maxX = Math.max(x0, x1);
+      if (minX <= margin) stampLine(ctx, x0 + W, y0, x1 + W, y1, size, color, shape, fallbackAngle);
+      if (maxX >= W - margin) stampLine(ctx, x0 - W, y0, x1 - W, y1, size, color, shape, fallbackAngle);
       return a;
     }
     return stampLine(ctx, x0, y0, x1, y1, size, color, shape, fallbackAngle);
