@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { GIFEncoder, quantize, applyPalette } from "gifenc";
 import { api, ApiError, type ApiUser, type ProjectListItem } from "@/lib/api";
-import { gridFromCanvas, synthSpectro, synthDensity, encodeWav, type OpticalMode } from "@/lib/opticalSound";
+import { gridFromCanvas, synthDensity, encodeWav, gridFromCanvasColor, synthSpectroColor, WAVE_TRIM, WAVE_PAN, type OpticalMode, type ColorGrid } from "@/lib/opticalSound";
 
 type Tool =
   | "pencil"
@@ -910,33 +910,37 @@ export default function Editor() {
   }
 
   // Read every frame's composite into an analysis grid and synthesize.
-  // SPECTRO reads a 128×64 grid (64 log-pitch bands); DENSITY reads
-  // 512×16 (temporal detail matters, rows just get averaged anyway).
-  function buildOpticalSamples(mode: OpticalMode): { samples: Float32Array; sampleRate: number } {
+  // SPECTRO reads a 128×64 COLOR grid (64 log-pitch bands, hue → timbre,
+  // stereo); DENSITY reads 512×16 luminance (mono film track — temporal
+  // detail matters, rows just get averaged anyway).
+  function buildOpticalSamples(mode: OpticalMode): { channels: Float32Array[]; sampleRate: number } {
     const n = frameCountOf();
     const frameDur = 1 / Math.max(1, fps);
-    const cols = mode === "spectro" ? 128 : 512;
-    const rows = mode === "spectro" ? 64 : 16;
+    const sampleRate = 44100;
+    if (mode === "spectro") {
+      const grids: ColorGrid[] = [];
+      for (let i = 0; i < n; i++) {
+        grids.push(gridFromCanvasColor(compositeFrameToCanvas(i), 128, 64));
+      }
+      const [L, R] = synthSpectroColor(grids, frameDur, sampleRate);
+      return { channels: [L, R], sampleRate };
+    }
     const grids = [];
     for (let i = 0; i < n; i++) {
-      grids.push(gridFromCanvas(compositeFrameToCanvas(i), cols, rows));
+      grids.push(gridFromCanvas(compositeFrameToCanvas(i), 512, 16));
     }
-    const sampleRate = 44100;
-    const samples = mode === "spectro"
-      ? synthSpectro(grids, frameDur, sampleRate)
-      : synthDensity(grids, frameDur, sampleRate);
-    return { samples, sampleRate };
+    const mono = synthDensity(grids, frameDur, sampleRate);
+    return { channels: [mono], sampleRate };
   }
 
   function playOpticalSound(mode: OpticalMode) {
     stopLiveSound(); // the live bank and one-shot playback are exclusive
     stopOpticalSound();
-    const { samples, sampleRate } = buildOpticalSamples(mode);
+    const { channels, sampleRate } = buildOpticalSamples(mode);
     const ctx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
     void ctx.resume(); // menu click = user gesture, resume is allowed
-    const buf = ctx.createBuffer(1, samples.length, sampleRate);
-    // Re-wrap to satisfy TS's Float32Array<ArrayBuffer> requirement
-    buf.copyToChannel(new Float32Array(samples), 0);
+    const buf = ctx.createBuffer(channels.length, channels[0].length, sampleRate);
+    channels.forEach((ch, i) => buf.copyToChannel(new Float32Array(ch), i));
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.loop = looping;
@@ -950,9 +954,9 @@ export default function Editor() {
   }
 
   function exportOpticalWav(mode: OpticalMode) {
-    const { samples, sampleRate } = buildOpticalSamples(mode);
+    const { channels, sampleRate } = buildOpticalSamples(mode);
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    downloadBlob(encodeWav(samples, sampleRate), `dpaint-son-optique-${mode}-${ts}.wav`);
+    downloadBlob(encodeWav(channels, sampleRate), `dpaint-son-optique-${mode}-${ts}.wav`);
   }
 
   // ---- EXPORT VIDÉO — automated render with the optical soundtrack ----
@@ -1026,9 +1030,9 @@ export default function Editor() {
     silence.start();
     let src: AudioBufferSourceNode | null = null;
     if (mode !== "silent") {
-      const { samples, sampleRate } = buildOpticalSamples(mode);
-      const buf = actx.createBuffer(1, samples.length, sampleRate);
-      buf.copyToChannel(new Float32Array(samples), 0);
+      const { channels, sampleRate } = buildOpticalSamples(mode);
+      const buf = actx.createBuffer(channels.length, channels[0].length, sampleRate);
+      channels.forEach((ch, i) => buf.copyToChannel(new Float32Array(ch), i));
       src = actx.createBufferSource();
       src.buffer = buf;
       src.loop = true;
@@ -1094,32 +1098,33 @@ export default function Editor() {
   }
 
   // ---- SPECTRO LIVE — real-time optical synthesizer ----
-  // A permanent bank of 64 sine oscillators (one per pitch band) whose
-  // gains are driven every animation frame by reading the ink column
-  // under a playhead that sweeps the frames at the animation's fps.
-  // Drawing modifies the analysis grid → the sound changes as the
-  // playhead passes — the canvas becomes a live instrument.
+  // Four banks of 64 oscillators (sine / saw / triangle / square — native
+  // band-limited Web Audio types), one per pitch band per timbre. The
+  // playhead sweeps the frames at the animation's fps and drives the
+  // gains from a COLOR analysis of the canvas: hue picks the waveform
+  // bank, saturation dials character, each bank sits at its own stereo
+  // position. Drawing modifies the grid → the sound follows live.
   const LIVE_COLS = 128, LIVE_ROWS = 64;
+  const LIVE_WAVES = ["sine", "sawtooth", "triangle", "square"] as const;
   const [liveSound, setLiveSound] = useState(false);
   const liveSoundRef = useRef(false);
   useEffect(() => { liveSoundRef.current = liveSound; }, [liveSound]);
   const liveChainRef = useRef<{
-    oscs: OscillatorNode[];
-    gains: GainNode[];
+    oscs: OscillatorNode[][];   // [wave][band]
+    gains: GainNode[][];        // [wave][band]
     master: GainNode;
     comp: DynamicsCompressorNode;
-    lastAmps: Float32Array;
+    lastAmps: Float32Array;     // wave*LIVE_ROWS + band
   } | null>(null);
-  const liveGridsRef = useRef<Map<number, FrameGridT>>(new Map());
+  const liveGridsRef = useRef<Map<number, ColorGrid>>(new Map());
   const liveStartRef = useRef(0);
   const liveRafRef = useRef<number | null>(null);
   const livePlayheadRef = useRef<HTMLDivElement | null>(null);
-  type FrameGridT = ReturnType<typeof gridFromCanvas>;
 
-  function getLiveGrid(idx: number): FrameGridT {
+  function getLiveGrid(idx: number): ColorGrid {
     const cached = liveGridsRef.current.get(idx);
     if (cached) return cached;
-    const g = gridFromCanvas(compositeFrameToCanvas(idx), LIVE_COLS, LIVE_ROWS);
+    const g = gridFromCanvasColor(compositeFrameToCanvas(idx), LIVE_COLS, LIVE_ROWS);
     liveGridsRef.current.set(idx, g);
     return g;
   }
@@ -1131,29 +1136,44 @@ export default function Editor() {
     void actx.resume();
     const comp = actx.createDynamicsCompressor(); // soft-limits dense drawings
     const master = actx.createGain();
-    master.gain.value = 0.25;
+    master.gain.value = 0.22;
     master.connect(comp);
     comp.connect(actx.destination);
     if (recAudioDestRef.current) {
       try { comp.connect(recAudioDestRef.current); } catch { /* noop */ }
     }
-    const oscs: OscillatorNode[] = [];
-    const gains: GainNode[] = [];
-    for (let r = 0; r < LIVE_ROWS; r++) {
-      const frac = r / (LIVE_ROWS - 1);
-      const f = 4186.01 * Math.pow(65.41 / 4186.01, frac); // C8 (top) → C2 (bottom)
-      const osc = actx.createOscillator();
-      osc.type = "sine";
-      osc.frequency.value = f;
-      const g = actx.createGain();
-      g.gain.value = 0;
-      osc.connect(g);
-      g.connect(master);
-      osc.start();
-      oscs.push(osc);
-      gains.push(g);
+    const trims = [WAVE_TRIM.sine, WAVE_TRIM.saw, WAVE_TRIM.tri, WAVE_TRIM.sqr];
+    const pans  = [WAVE_PAN.sine,  WAVE_PAN.saw,  WAVE_PAN.tri,  WAVE_PAN.sqr];
+    const oscs: OscillatorNode[][] = [];
+    const gains: GainNode[][] = [];
+    for (let w = 0; w < LIVE_WAVES.length; w++) {
+      // Per-wave bus: trim → stereo position → master
+      const bus = actx.createGain();
+      bus.gain.value = trims[w];
+      const panner = actx.createStereoPanner();
+      panner.pan.value = pans[w];
+      bus.connect(panner);
+      panner.connect(master);
+      const wOscs: OscillatorNode[] = [];
+      const wGains: GainNode[] = [];
+      for (let r = 0; r < LIVE_ROWS; r++) {
+        const frac = r / (LIVE_ROWS - 1);
+        const f = 4186.01 * Math.pow(65.41 / 4186.01, frac); // C8 (top) → C2 (bottom)
+        const osc = actx.createOscillator();
+        osc.type = LIVE_WAVES[w];
+        osc.frequency.value = f;
+        const g = actx.createGain();
+        g.gain.value = 0;
+        osc.connect(g);
+        g.connect(bus);
+        osc.start();
+        wOscs.push(osc);
+        wGains.push(g);
+      }
+      oscs.push(wOscs);
+      gains.push(wGains);
     }
-    liveChainRef.current = { oscs, gains, master, comp, lastAmps: new Float32Array(LIVE_ROWS) };
+    liveChainRef.current = { oscs, gains, master, comp, lastAmps: new Float32Array(LIVE_WAVES.length * LIVE_ROWS) };
     liveGridsRef.current.clear();
     liveStartRef.current = actx.currentTime;
 
@@ -1171,14 +1191,20 @@ export default function Editor() {
       const c1 = Math.min(LIVE_COLS - 1, c0 + 1);
       const ct = colF - c0;
       const grid = getLiveGrid(fi);
+      const waveArrs = [grid.sine, grid.saw, grid.tri, grid.sqr];
       const now = ctx2.currentTime;
-      for (let r = 0; r < LIVE_ROWS; r++) {
-        const a0 = grid.ink[r * LIVE_COLS + c0];
-        const a1 = grid.ink[r * LIVE_COLS + c1];
-        const a = a0 + (a1 - a0) * ct;
-        if (Math.abs(a - chain.lastAmps[r]) > 0.004) {
-          chain.gains[r].gain.setTargetAtTime(a, now, 0.012);
-          chain.lastAmps[r] = a;
+      for (let w = 0; w < waveArrs.length; w++) {
+        const arr = waveArrs[w];
+        const wGains = chain.gains[w];
+        const base = w * LIVE_ROWS;
+        for (let r = 0; r < LIVE_ROWS; r++) {
+          const a0 = arr[r * LIVE_COLS + c0];
+          const a1 = arr[r * LIVE_COLS + c1];
+          const a = a0 + (a1 - a0) * ct;
+          if (Math.abs(a - chain.lastAmps[base + r]) > 0.004) {
+            wGains[r].gain.setTargetAtTime(a, now, 0.012);
+            chain.lastAmps[base + r] = a;
+          }
         }
       }
       // Playhead line: canvas column under the head, adjusted for the
@@ -1207,7 +1233,7 @@ export default function Editor() {
       try { chain.master.gain.setTargetAtTime(0, now, 0.03); } catch { /* noop */ }
       // Stop the oscillators after the fade-out tail
       setTimeout(() => {
-        chain.oscs.forEach(o => { try { o.stop(); } catch { /* noop */ } });
+        chain.oscs.forEach(bank => bank.forEach(o => { try { o.stop(); } catch { /* noop */ } }));
         try { chain.comp.disconnect(); } catch { /* noop */ }
         try { chain.master.disconnect(); } catch { /* noop */ }
       }, 120);
@@ -1220,7 +1246,7 @@ export default function Editor() {
   useEffect(() => () => {
     try { audioSrcRef.current?.stop(); } catch { /* noop */ }
     if (liveRafRef.current != null) cancelAnimationFrame(liveRafRef.current);
-    liveChainRef.current?.oscs.forEach(o => { try { o.stop(); } catch { /* noop */ } });
+    liveChainRef.current?.oscs.forEach(bank => bank.forEach(o => { try { o.stop(); } catch { /* noop */ } }));
     void audioCtxRef.current?.close();
   }, []);
 
@@ -3751,6 +3777,20 @@ export default function Editor() {
           { label: "—", action: () => {} },
           { label: "⬇ EXPORT WAV — SPECTRO", action: () => exportOpticalWav("spectro") },
           { label: "⬇ EXPORT WAV — DENSITÉ", action: () => exportOpticalWav("density") },
+          { label: "—", action: () => {} },
+          {
+            label: "🎨 COULEURS → TIMBRES (aide)",
+            action: () => alert(
+              "Le SPECTRO lit la COULEUR :\n\n" +
+              "  Noir/gris  → SINUS (pur, centre)\n" +
+              "  Rouges     → SCIE (cuivré, gauche)\n" +
+              "  Verts      → TRIANGLE (flûté, centre-droit)\n" +
+              "  Bleus      → CARRÉ (chiptune, droite)\n\n" +
+              "Saturation = dose de caractère (pastel ≈ sinus, saturé = plein timbre).\n" +
+              "Hauteur : grave en bas du canvas, aigu en haut (C2 → C8).\n" +
+              "Essaie une ligne rouge + une ligne bleue à des hauteurs différentes : accord stéréo !"
+            ),
+          },
         ]} />
         <button
           className="amiga-button"
