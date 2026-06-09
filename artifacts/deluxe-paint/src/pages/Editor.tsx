@@ -929,6 +929,7 @@ export default function Editor() {
   }
 
   function playOpticalSound(mode: OpticalMode) {
+    stopLiveSound(); // the live bank and one-shot playback are exclusive
     stopOpticalSound();
     const { samples, sampleRate } = buildOpticalSamples(mode);
     const ctx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
@@ -954,9 +955,134 @@ export default function Editor() {
     downloadBlob(encodeWav(samples, sampleRate), `dpaint-son-optique-${mode}-${ts}.wav`);
   }
 
+  // ---- SPECTRO LIVE — real-time optical synthesizer ----
+  // A permanent bank of 64 sine oscillators (one per pitch band) whose
+  // gains are driven every animation frame by reading the ink column
+  // under a playhead that sweeps the frames at the animation's fps.
+  // Drawing modifies the analysis grid → the sound changes as the
+  // playhead passes — the canvas becomes a live instrument.
+  const LIVE_COLS = 128, LIVE_ROWS = 64;
+  const [liveSound, setLiveSound] = useState(false);
+  const liveSoundRef = useRef(false);
+  useEffect(() => { liveSoundRef.current = liveSound; }, [liveSound]);
+  const liveChainRef = useRef<{
+    oscs: OscillatorNode[];
+    gains: GainNode[];
+    master: GainNode;
+    comp: DynamicsCompressorNode;
+    lastAmps: Float32Array;
+  } | null>(null);
+  const liveGridsRef = useRef<Map<number, FrameGridT>>(new Map());
+  const liveStartRef = useRef(0);
+  const liveRafRef = useRef<number | null>(null);
+  const livePlayheadRef = useRef<HTMLDivElement | null>(null);
+  type FrameGridT = ReturnType<typeof gridFromCanvas>;
+
+  function getLiveGrid(idx: number): FrameGridT {
+    const cached = liveGridsRef.current.get(idx);
+    if (cached) return cached;
+    const g = gridFromCanvas(compositeFrameToCanvas(idx), LIVE_COLS, LIVE_ROWS);
+    liveGridsRef.current.set(idx, g);
+    return g;
+  }
+
+  function startLiveSound() {
+    stopOpticalSound(); // one-shot playback off — the live bank takes over
+    if (liveChainRef.current) return;
+    const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
+    void actx.resume();
+    const comp = actx.createDynamicsCompressor(); // soft-limits dense drawings
+    const master = actx.createGain();
+    master.gain.value = 0.25;
+    master.connect(comp);
+    comp.connect(actx.destination);
+    if (recAudioDestRef.current) {
+      try { comp.connect(recAudioDestRef.current); } catch { /* noop */ }
+    }
+    const oscs: OscillatorNode[] = [];
+    const gains: GainNode[] = [];
+    for (let r = 0; r < LIVE_ROWS; r++) {
+      const frac = r / (LIVE_ROWS - 1);
+      const f = 4186.01 * Math.pow(65.41 / 4186.01, frac); // C8 (top) → C2 (bottom)
+      const osc = actx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = f;
+      const g = actx.createGain();
+      g.gain.value = 0;
+      osc.connect(g);
+      g.connect(master);
+      osc.start();
+      oscs.push(osc);
+      gains.push(g);
+    }
+    liveChainRef.current = { oscs, gains, master, comp, lastAmps: new Float32Array(LIVE_ROWS) };
+    liveGridsRef.current.clear();
+    liveStartRef.current = actx.currentTime;
+
+    const tick = () => {
+      const chain = liveChainRef.current;
+      const ctx2 = audioCtxRef.current;
+      if (!chain || !ctx2) return;
+      const n = Math.max(1, frameCountRef.current);
+      const frameDur = 1 / Math.max(1, fpsRef.current);
+      const loopDur = n * frameDur;
+      const t2 = (ctx2.currentTime - liveStartRef.current) % loopDur;
+      const fi = Math.min(n - 1, Math.floor(t2 / frameDur));
+      const colF = ((t2 - fi * frameDur) / frameDur) * (LIVE_COLS - 1);
+      const c0 = Math.floor(colF);
+      const c1 = Math.min(LIVE_COLS - 1, c0 + 1);
+      const ct = colF - c0;
+      const grid = getLiveGrid(fi);
+      const now = ctx2.currentTime;
+      for (let r = 0; r < LIVE_ROWS; r++) {
+        const a0 = grid.ink[r * LIVE_COLS + c0];
+        const a1 = grid.ink[r * LIVE_COLS + c1];
+        const a = a0 + (a1 - a0) * ct;
+        if (Math.abs(a - chain.lastAmps[r]) > 0.004) {
+          chain.gains[r].gain.setTargetAtTime(a, now, 0.012);
+          chain.lastAmps[r] = a;
+        }
+      }
+      // Playhead line: canvas column under the head, adjusted for the
+      // PANO offset so the line matches what's visually under it.
+      const ph = livePlayheadRef.current;
+      if (ph) {
+        const W = canvasWRef.current;
+        let colCanvas = (colF / (LIVE_COLS - 1)) * W;
+        if (spinModeRef.current === "pan") {
+          colCanvas = ((colCanvas - panOffsetRef.current) % W + W) % W;
+        }
+        ph.style.left = `${colCanvas * zoomRef.current}px`;
+      }
+      liveRafRef.current = requestAnimationFrame(tick);
+    };
+    liveRafRef.current = requestAnimationFrame(tick);
+    setLiveSound(true);
+  }
+
+  function stopLiveSound() {
+    const chain = liveChainRef.current;
+    if (liveRafRef.current != null) { cancelAnimationFrame(liveRafRef.current); liveRafRef.current = null; }
+    if (chain) {
+      const actx = audioCtxRef.current;
+      const now = actx?.currentTime ?? 0;
+      try { chain.master.gain.setTargetAtTime(0, now, 0.03); } catch { /* noop */ }
+      // Stop the oscillators after the fade-out tail
+      setTimeout(() => {
+        chain.oscs.forEach(o => { try { o.stop(); } catch { /* noop */ } });
+        try { chain.comp.disconnect(); } catch { /* noop */ }
+        try { chain.master.disconnect(); } catch { /* noop */ }
+      }, 120);
+      liveChainRef.current = null;
+    }
+    setLiveSound(false);
+  }
+
   // Stop audio + close the context on unmount
   useEffect(() => () => {
     try { audioSrcRef.current?.stop(); } catch { /* noop */ }
+    if (liveRafRef.current != null) cancelAnimationFrame(liveRafRef.current);
+    liveChainRef.current?.oscs.forEach(o => { try { o.stop(); } catch { /* noop */ } });
     void audioCtxRef.current?.close();
   }, []);
 
@@ -1446,6 +1572,7 @@ export default function Editor() {
   const thumbCacheRef = useRef<Map<number, HTMLCanvasElement>>(new Map());
   useEffect(() => {
     thumbCacheRef.current.clear();
+    liveGridsRef.current.clear(); // live-synth grids share the same validity
   }, [layerVersion, frameCount, canvasW, canvasH]);
   function getThumbForRender(i: number): HTMLCanvasElement {
     const cached = thumbCacheRef.current.get(i);
@@ -1599,6 +1726,9 @@ export default function Editor() {
     // Invalidate the thumbnail cache for the frame we just modified so
     // the next render (or the next playback start) recomputes it.
     thumbCacheRef.current.delete(currentFrameRef.current);
+    // Same for the live-synth analysis grid — the playhead picks up the
+    // fresh ink on its next pass over this frame.
+    liveGridsRef.current.delete(currentFrameRef.current);
   }
   function loadFrame(_idx: number) { composite(); /* immediate — frame switch should be visible right away */ }
 
@@ -1685,8 +1815,9 @@ export default function Editor() {
     void actx.resume(); // REC click is a user gesture
     if (!recAudioDestRef.current) recAudioDestRef.current = actx.createMediaStreamDestination();
     const audioDest = recAudioDestRef.current;
-    // If a sound is ALREADY playing, tap it too
+    // If a sound is ALREADY playing, tap it too (one-shot + live bank)
     try { audioSrcRef.current?.connect(audioDest); } catch { /* already connected */ }
+    try { liveChainRef.current?.comp.connect(audioDest); } catch { /* already connected */ }
 
     const stream = new MediaStream([
       ...videoStream.getVideoTracks(),
@@ -3463,9 +3594,11 @@ export default function Editor() {
           action: () => setPaletteId(p.id),
         }))} />
         <MenuDropdown label="SON" items={[
+          { label: liveSound ? "🎹 SPECTRO LIVE — ARRÊTER ✓" : "🎹 SPECTRO LIVE — le son suit le dessin en direct", action: () => (liveSound ? stopLiveSound() : startLiveSound()) },
+          { label: "—", action: () => {} },
           { label: "▶ JOUER — SPECTRO (image = spectrogramme)", action: () => playOpticalSound("spectro") },
           { label: "▶ JOUER — DENSITÉ (piste optique McLaren)", action: () => playOpticalSound("density") },
-          { label: "■ STOP", action: stopOpticalSound },
+          { label: "■ STOP", action: () => { stopOpticalSound(); stopLiveSound(); } },
           { label: "—", action: () => {} },
           { label: "⬇ EXPORT WAV — SPECTRO", action: () => exportOpticalWav("spectro") },
           { label: "⬇ EXPORT WAV — DENSITÉ", action: () => exportOpticalWav("density") },
@@ -3626,6 +3759,24 @@ export default function Editor() {
               height={canvasH}
               style={{ ...canvasStyle, position: "absolute", top: 0, left: 0, zIndex: 2, pointerEvents: "none" }}
             />
+            {/* SPECTRO LIVE playhead — position driven by the audio clock
+                (rotates with PLATINE since it lives inside the wrapper) */}
+            {liveSound && (
+              <div
+                ref={livePlayheadRef}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: 2,
+                  height: canvasH * zoom,
+                  background: t.accent,
+                  opacity: 0.85,
+                  pointerEvents: "none",
+                  zIndex: 3,
+                }}
+              />
+            )}
           </div>
         </div>
       </div>
