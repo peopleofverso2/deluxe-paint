@@ -1097,6 +1097,82 @@ export default function Editor() {
     requestAnimationFrame(driver);
   }
 
+  // ---- VOIX — playhead-triggered speech from TEXT stamps ----
+  // Every TEXT-tool stamp is remembered as a timeline event. When the
+  // SPECTRO LIVE playhead crosses its X position, the system voice reads
+  // it: Y position → pitch (high on top, like the spectro), hue → rate
+  // and voice choice (red = fast, blue = slow). Browser limitation: the
+  // Speech API plays OUTSIDE Web Audio, so voices are live-only (not in
+  // ● REC / EXPORT VIDÉO captures).
+  type TextStamp = { frame: number; x: number; y: number; color: string; text: string };
+  const textStampsRef = useRef<TextStamp[]>([]);
+  const [voicesOn, setVoicesOn] = useState(true);
+  const voicesOnRef = useRef(true);
+  useEffect(() => { voicesOnRef.current = voicesOn; }, [voicesOn]);
+  const lastPlayheadColRef = useRef(0);
+  const lastPlayheadFrameRef = useRef(0);
+
+  function recordTextStamp(frame: number, x: number, y: number, color: string, text: string) {
+    textStampsRef.current.push({ frame, x, y, color, text });
+  }
+
+  function hexHueSat(hex: string): { h: number; s: number } {
+    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    if (!m) return { h: 0, s: 0 };
+    const r = parseInt(m[1], 16) / 255, g = parseInt(m[2], 16) / 255, b = parseInt(m[3], 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const d = max - min;
+    const l = (max + min) / 2;
+    const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1) || 1);
+    let h = 0;
+    if (d !== 0) {
+      if (max === r) h = 60 * (((g - b) / d) % 6);
+      else if (max === g) h = 60 * ((b - r) / d + 2);
+      else h = 60 * ((r - g) / d + 4);
+      if (h < 0) h += 360;
+    }
+    return { h, s };
+  }
+
+  function speakStamp(stamp: TextStamp) {
+    if (!("speechSynthesis" in window)) return;
+    const u = new SpeechSynthesisUtterance(stamp.text);
+    u.lang = "fr-FR";
+    // Y → pitch: top of canvas = 2.0 (high), bottom = 0.2 (low)
+    const yFrac = Math.max(0, Math.min(1, stamp.y / Math.max(1, canvasHRef.current)));
+    u.pitch = 2 - yFrac * 1.8;
+    // Hue → rate: reds fast, blues slow, grays neutral
+    const { h, s } = hexHueSat(stamp.color);
+    if (s < 0.15) u.rate = 1.0;
+    else if (h < 90 || h >= 330) u.rate = 1.5;
+    else if (h < 210) u.rate = 1.0;
+    else u.rate = 0.65;
+    // Hue bucket picks among installed French voices (variety!)
+    const voices = window.speechSynthesis.getVoices().filter(v => v.lang.toLowerCase().startsWith("fr"));
+    if (voices.length > 0) {
+      const bucket = s < 0.15 ? 0 : (h < 90 || h >= 330) ? 1 : h < 210 ? 2 : 3;
+      u.voice = voices[bucket % voices.length];
+    }
+    window.speechSynthesis.speak(u);
+  }
+
+  // Crossing detection — called from the live tick with the playhead's
+  // current frame + column position (in canvas px).
+  function checkVoiceTriggers(frame: number, colCanvasX: number) {
+    if (!voicesOnRef.current) return;
+    const prevCol = lastPlayheadColRef.current;
+    const prevFrame = lastPlayheadFrameRef.current;
+    lastPlayheadColRef.current = colCanvasX;
+    lastPlayheadFrameRef.current = frame;
+    if (frame !== prevFrame) return; // frame switch / loop wrap — no segment to test
+    if (colCanvasX <= prevCol) return; // wrapped or stalled
+    for (const st of textStampsRef.current) {
+      if (st.frame === frame && st.x > prevCol && st.x <= colCanvasX) {
+        speakStamp(st);
+      }
+    }
+  }
+
   // ---- SPECTRO LIVE — real-time optical synthesizer ----
   // Four banks of 64 oscillators (sine / saw / triangle / square — native
   // band-limited Web Audio types), one per pitch band per timbre. The
@@ -1207,12 +1283,15 @@ export default function Editor() {
           }
         }
       }
+      // Voice triggers: speak TEXT stamps the playhead just crossed
+      const readX = (colF / (LIVE_COLS - 1)) * canvasWRef.current;
+      checkVoiceTriggers(fi, readX);
       // Playhead line: canvas column under the head, adjusted for the
       // PANO offset so the line matches what's visually under it.
       const ph = livePlayheadRef.current;
       if (ph) {
         const W = canvasWRef.current;
-        let colCanvas = (colF / (LIVE_COLS - 1)) * W;
+        let colCanvas = readX;
         if (spinModeRef.current === "pan") {
           colCanvas = ((colCanvas - panOffsetRef.current) % W + W) % W;
         }
@@ -2090,6 +2169,8 @@ export default function Editor() {
     const newIdx = currentFrameRef.current + 1;
     // Insert a fresh empty slot in every layer
     for (const layer of layersRef.current) layer.frames.splice(newIdx, 0, null);
+    // Shift voice stamps living on later frames
+    textStampsRef.current.forEach(st => { if (st.frame >= newIdx) st.frame += 1; });
     const newCount = frameCountOf();
     frameCountRef.current = newCount;
     setFrameCount(newCount);
@@ -2117,6 +2198,8 @@ export default function Editor() {
     const newCount = frameCountOf();
     frameCountRef.current = newCount;
     setFrameCount(newCount);
+    // Shift voice stamps living on later frames (slot inserted at newIdx)
+    textStampsRef.current.forEach(st => { if (st.frame >= newIdx) st.frame += 1; });
     switchToFrame(newIdx);
     bumpLayers();
   }
@@ -2126,12 +2209,17 @@ export default function Editor() {
     if (frameCountRef.current <= 1) {
       // Last frame: clear every layer's only slot instead of removing
       for (const layer of layersRef.current) layer.frames[0] = null;
+      textStampsRef.current = textStampsRef.current.filter(st => st.frame !== 0);
       composite();
       bumpLayers();
       return;
     }
     stopPlayback();
-    for (const layer of layersRef.current) layer.frames.splice(currentFrameRef.current, 1);
+    const delIdx = currentFrameRef.current;
+    for (const layer of layersRef.current) layer.frames.splice(delIdx, 1);
+    // Drop voice stamps of the removed frame, shift later ones back
+    textStampsRef.current = textStampsRef.current.filter(st => st.frame !== delIdx);
+    textStampsRef.current.forEach(st => { if (st.frame > delIdx) st.frame -= 1; });
     const newCount = frameCountOf();
     frameCountRef.current = newCount;
     setFrameCount(newCount);
@@ -2202,6 +2290,7 @@ export default function Editor() {
         pushUndo();
         const font = allFonts[textFontIdx] ?? TEXT_FONTS[0];
         stampText(ctx, pos.x, pos.y, color, textInput, font.family, textSize, aliased, !!font.pixel);
+        recordTextStamp(currentFrameRef.current, pos.x, pos.y, color, textInput);
         saveLiveCanvas();
       }
       drawingRef.current = false;
@@ -2651,6 +2740,7 @@ export default function Editor() {
           pushUndo();
           const font = allFontsRef.current[textFontIdxRef.current] ?? TEXT_FONTS[0];
           stampText(ctx, pos.x, pos.y, color, txt, font.family, textSizeRef.current, aliasedRef.current, !!font.pixel);
+          recordTextStamp(currentFrameRef.current, pos.x, pos.y, color, txt);
           composite();
         }
         drawingRef.current = false;
@@ -2804,6 +2894,7 @@ export default function Editor() {
     setFrameCount(1);
     currentFrameRef.current = 0;
     setCurrentFrame(0);
+    textStampsRef.current = [];
     clearHistory();
     bumpLayers();
     composite();
@@ -3303,6 +3394,9 @@ export default function Editor() {
       currentFrame,
       activeLayerIdx,
       layers,
+      // Voice timeline events (TEXT-tool stamps) — optional field, older
+      // loaders pass it through harmlessly
+      textStamps: textStampsRef.current,
     };
   }
 
@@ -3315,6 +3409,7 @@ export default function Editor() {
       currentFrame?: number; activeLayerIdx?: number;
       layers?: Array<{ id?: string; name?: string; visible?: boolean; opacity?: number; frames: (string | null)[] }>;
       frames?: (string | null)[];
+      textStamps?: Array<{ frame: number; x: number; y: number; color: string; text: string }>;
     };
     if (d.format !== "dpaint-project") throw new Error("Format inconnu (attendu : dpaint-project)");
     const targetW = typeof d.width === "number" && d.width > 0 ? d.width : canvasW;
@@ -3374,6 +3469,10 @@ export default function Editor() {
     setCurrentFrame(startFrame);
     const startLayer = typeof d.activeLayerIdx === "number" ? Math.min(Math.max(0, d.activeLayerIdx), layersRef.current.length - 1) : 0;
     setActiveLayerIdx(startLayer); activeLayerIdxRef.current = startLayer;
+    // Restore voice timeline (clamped to the loaded frame range)
+    textStampsRef.current = Array.isArray(d.textStamps)
+      ? d.textStamps.filter(st => typeof st?.text === "string" && typeof st?.frame === "number" && st.frame >= 0 && st.frame < n)
+      : [];
     bumpLayers();
     composite();
   }
@@ -3426,26 +3525,9 @@ export default function Editor() {
   }
 
   function handleSaveProject() {
-    // version 2: layers as tracks. Each layer carries meta + an array of
-    // dataURLs (or nulls) for its per-frame canvases.
-    const layers = layersRef.current.map(layer => ({
-      id: layer.id,
-      name: layer.name,
-      visible: layer.visible,
-      opacity: layer.opacity,
-      frames: layer.frames.map(c => c ? c.toDataURL("image/png") : null),
-    }));
-    const data = {
-      format: "dpaint-project",
-      version: 2,
-      width: canvasW,
-      height: canvasH,
-      fps,
-      looping,
-      currentFrame,
-      activeLayerIdx,
-      layers,
-    };
+    // Same payload as the cloud path (buildProjectPayload) — includes the
+    // voice timeline (textStamps).
+    const data = buildProjectPayload();
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     downloadBlob(new Blob([JSON.stringify(data)], { type: "application/json" }), `dpaint-project-${ts}.dpaint`);
   }
@@ -3459,79 +3541,8 @@ export default function Editor() {
     if (!file) return;
     try {
       const text = await file.text();
-      const data = JSON.parse(text);
-      if (data?.format !== "dpaint-project") throw new Error("Format inconnu (attendu : dpaint-project)");
-      const targetW = typeof data.width === "number" && data.width > 0 ? data.width : canvasW;
-      const targetH = typeof data.height === "number" && data.height > 0 ? data.height : canvasH;
-      stopPlayback();
-
-      // Helper: load a dataURL into a fresh layer-sized canvas
-      const loadCanvas = (url: string | null): Promise<HTMLCanvasElement | null> => {
-        if (!url) return Promise.resolve(null);
-        return new Promise((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => {
-            const c = makeLayerCanvas(targetW, targetH);
-            const cx = c.getContext("2d")!;
-            cx.imageSmoothingEnabled = false;
-            cx.drawImage(img, 0, 0);
-            resolve(c);
-          };
-          img.onerror = () => reject(new Error("Frame illisible"));
-          img.src = url;
-        });
-      };
-
-      let newLayers: Layer[];
-      // version 2: layers as tracks
-      if (Array.isArray(data.layers)) {
-        newLayers = await Promise.all(
-          (data.layers as Array<{ id?: string; name?: string; visible?: boolean; opacity?: number; frames: (string | null)[] }>).map(async (l, i) => {
-            const frames = await Promise.all((l.frames ?? []).map(loadCanvas));
-            return {
-              id: l.id ?? `${Date.now().toString(36)}-${i}`,
-              name: l.name ?? `CALQUE ${i + 1}`,
-              visible: typeof l.visible === "boolean" ? l.visible : true,
-              opacity: typeof l.opacity === "number" ? l.opacity : 1,
-              frames,
-            } as Layer;
-          })
-        );
-      // version 1: flat frames array → wrap as a single layer
-      } else if (Array.isArray(data.frames)) {
-        const frames = await Promise.all((data.frames as (string | null)[]).map(loadCanvas));
-        newLayers = [{
-          id: `${Date.now().toString(36)}-1`,
-          name: "CALQUE 1",
-          visible: true,
-          opacity: 1,
-          frames,
-        }];
-      } else {
-        throw new Error("Aucun calque ni frame dans le projet");
-      }
-
-      if (targetW !== canvasW || targetH !== canvasH) {
-        setCanvasW(targetW);
-        setCanvasH(targetH);
-        canvasWRef.current = targetW;
-        canvasHRef.current = targetH;
-      }
-      layersRef.current = newLayers.length ? newLayers : [makeLayer("CALQUE 1", 1)];
-      const n = frameCountOf();
-      frameCountRef.current = n;
-      setFrameCount(n);
-      clearHistory();
-      if (typeof data.fps === "number") setFps(data.fps);
-      if (typeof data.looping === "boolean") { setLooping(data.looping); loopingRef.current = data.looping; }
-      const startFrame = typeof data.currentFrame === "number" ? Math.min(Math.max(0, data.currentFrame), n - 1) : 0;
-      currentFrameRef.current = startFrame;
-      setCurrentFrame(startFrame);
-      const startLayer = typeof data.activeLayerIdx === "number" ? Math.min(Math.max(0, data.activeLayerIdx), layersRef.current.length - 1) : 0;
-      setActiveLayerIdx(startLayer);
-      activeLayerIdxRef.current = startLayer;
-      bumpLayers();
-      composite();
+      // Shared loader (same as the cloud path) — handles v1/v2 + textStamps
+      await loadProjectData(JSON.parse(text));
     } catch (err) {
       alert("Impossible de charger le projet : " + (err instanceof Error ? err.message : String(err)));
     }
@@ -3770,6 +3781,8 @@ export default function Editor() {
         }))} />
         <MenuDropdown label="SON" items={[
           { label: liveSound ? "🎹 SPECTRO LIVE — ARRÊTER ✓" : "🎹 SPECTRO LIVE — le son suit le dessin en direct", action: () => (liveSound ? stopLiveSound() : startLiveSound()) },
+          { label: voicesOn ? "🗣 VOIX (textes lus) — ON ✓" : "🗣 VOIX (textes lus) — OFF", action: () => setVoicesOn(v => !v) },
+          { label: "🗑 EFFACER LES VOIX (textes mémorisés)", action: () => { if (confirm(`Effacer ${textStampsRef.current.length} texte(s) de la timeline vocale ?`)) textStampsRef.current = []; } },
           { label: "—", action: () => {} },
           { label: "▶ JOUER — SPECTRO (image = spectrogramme)", action: () => playOpticalSound("spectro") },
           { label: "▶ JOUER — DENSITÉ (piste optique McLaren)", action: () => playOpticalSound("density") },
