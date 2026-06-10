@@ -1097,6 +1097,126 @@ export default function Editor() {
     requestAnimationFrame(driver);
   }
 
+  // ---- TAPISSERIE — the whole animation as one immense score strip ----
+  // Bayeux-style: every frame side by side on a linen ground, with a
+  // footer band carrying the DRAWN WAVEFORM of the optical soundtrack
+  // (what the playhead actually reads), frame numbers + timecode like a
+  // 35mm film edge, and markers for the voice stamps. The partition.
+  async function exportTapestry() {
+    const n = frameCountOf();
+    const frameDur = 1 / Math.max(1, fps);
+    const sep = Math.max(2, Math.round(canvasW * 0.006));
+    const naturalW = n * canvasW + (n + 1) * sep;
+    const footerH = Math.max(56, Math.round(canvasH * 0.2));
+    const naturalH = sep + canvasH + sep + footerH + sep;
+    // Browsers cap canvas dimensions (~16k safe) — scale the whole strip
+    const MAX_W = 16000, MAX_H = 8000;
+    const scale = Math.min(1, MAX_W / naturalW, MAX_H / naturalH);
+    const W = Math.max(1, Math.floor(naturalW * scale));
+    const H = Math.max(1, Math.floor(naturalH * scale));
+    const c = document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const tctx = c.getContext("2d")!;
+
+    // Linen ground
+    tctx.fillStyle = "#EDE3CE";
+    tctx.fillRect(0, 0, W, H);
+
+    // Frames, blitted layer-by-layer directly at scale (no intermediates)
+    tctx.save();
+    tctx.scale(scale, scale);
+    tctx.imageSmoothingEnabled = scale < 1; // average down when shrinking
+    for (let i = 0; i < n; i++) {
+      const x = sep + i * (canvasW + sep);
+      tctx.fillStyle = "#FFFFFF";
+      tctx.fillRect(x, sep, canvasW, canvasH);
+      for (const layer of layersRef.current) {
+        if (!layer.visible) continue;
+        const lc = layer.frames[i];
+        if (!lc) continue;
+        tctx.globalAlpha = layer.opacity;
+        tctx.drawImage(lc, x, sep);
+      }
+      tctx.globalAlpha = 1;
+    }
+    tctx.restore();
+
+    // Footer geometry in DEVICE pixels
+    const stripX = Math.round(sep * scale);
+    const stripW = W - 2 * stripX;
+    const footTop = Math.round((sep + canvasH + sep) * scale);
+    const footHpx = Math.round(footerH * scale);
+    const waveTop = footTop + Math.round(footHpx * 0.18);
+    const waveH = Math.round(footHpx * 0.58);
+
+    // Soundtrack waveform (spectro stereo mixed down) — min/max envelope
+    try {
+      const { channels } = buildOpticalSamples("spectro");
+      const L2 = channels[0], R2 = channels[1] ?? channels[0];
+      const total = L2.length;
+      const mid = waveTop + waveH / 2;
+      tctx.strokeStyle = "#C04849";
+      tctx.lineWidth = 1;
+      tctx.beginPath();
+      for (let px = 0; px < stripW; px++) {
+        const s0 = Math.floor((px / stripW) * total);
+        const s1 = Math.min(total, Math.floor(((px + 1) / stripW) * total) + 1);
+        let mn = 0, mx = 0;
+        for (let s = s0; s < s1; s++) {
+          const v = (L2[s] + R2[s]) / 2;
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+        tctx.moveTo(stripX + px + 0.5, mid + mn * (waveH / 2));
+        tctx.lineTo(stripX + px + 0.5, mid + mx * (waveH / 2) + 0.5);
+      }
+      tctx.stroke();
+      // Center line
+      tctx.strokeStyle = "rgba(25,25,25,0.25)";
+      tctx.beginPath();
+      tctx.moveTo(stripX, mid + 0.5);
+      tctx.lineTo(stripX + stripW, mid + 0.5);
+      tctx.stroke();
+    } catch { /* soundtrack optional — strip still exports */ }
+
+    // Frame ticks, numbers + timecode (film-edge style)
+    const labelH = Math.max(9, Math.round(footHpx * 0.16));
+    tctx.font = `${labelH}px 'VT323', monospace`;
+    tctx.fillStyle = "#191919";
+    tctx.textBaseline = "bottom";
+    for (let i = 0; i < n; i++) {
+      const fx = Math.round((sep + i * (canvasW + sep)) * scale);
+      tctx.strokeStyle = "rgba(25,25,25,0.5)";
+      tctx.beginPath();
+      tctx.moveTo(fx + 0.5, footTop);
+      tctx.lineTo(fx + 0.5, footTop + footHpx);
+      tctx.stroke();
+      tctx.fillText(` ${String(i + 1).padStart(3, "0")} · ${(i * frameDur).toFixed(2)}s`, fx, footTop + footHpx - 2);
+    }
+
+    // Voice stamp markers (colored diamonds at their timeline position)
+    for (const st of textStampsRef.current) {
+      if (st.frame < 0 || st.frame >= n) continue;
+      const sx = Math.round((sep + st.frame * (canvasW + sep) + st.x) * scale);
+      const sy = footTop + Math.round(footHpx * 0.08);
+      const r = Math.max(3, Math.round(footHpx * 0.05));
+      tctx.fillStyle = st.color;
+      tctx.beginPath();
+      tctx.moveTo(sx, sy - r);
+      tctx.lineTo(sx + r, sy);
+      tctx.lineTo(sx, sy + r);
+      tctx.lineTo(sx - r, sy);
+      tctx.closePath();
+      tctx.fill();
+    }
+
+    const blob = await new Promise<Blob | null>(resolve => c.toBlob(resolve, "image/png"));
+    if (!blob) { alert("Export tapisserie impossible (canvas trop grand ?)"); return; }
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    downloadBlob(blob, `dpaint-tapisserie-${ts}.png`);
+  }
+
   // ---- VOIX — playhead-triggered speech from TEXT stamps ----
   // Every TEXT-tool stamp is remembered as a timeline event. When the
   // SPECTRO LIVE playhead crosses its X position, the system voice reads
@@ -3706,6 +3826,7 @@ export default function Editor() {
             { label: "🎬 EXPORT VIDÉO + SON SPECTRO", action: () => exportVideo("spectro") },
             { label: "🎬 EXPORT VIDÉO + SON DENSITÉ", action: () => exportVideo("density") },
             { label: "🎬 EXPORT VIDÉO (MUET)", action: () => exportVideo("silent") },
+            { label: "🪡 EXPORT TAPISSERIE (bande-partition PNG)", action: () => { void exportTapestry(); } },
           ];
         })()} />
         <input
