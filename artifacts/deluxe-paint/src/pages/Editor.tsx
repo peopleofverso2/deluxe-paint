@@ -1097,6 +1097,138 @@ export default function Editor() {
     requestAnimationFrame(driver);
   }
 
+  // ---- 📷 LECTEUR OPTIQUE — play the printed tapestry with the camera ----
+  // A vertical scan line sits in the middle of the camera view. Whatever
+  // crosses it is read as a spectro column (same hue→timbre engine) and
+  // synthesized live. Slide the printed tapestry past the lens like tape
+  // across a head — YOUR HAND is the transport. Reads anything: the
+  // tapestry, a paper sketch, a book spine, the room.
+  const [cameraReader, setCameraReader] = useState(false);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraChainRef = useRef<LiveChain | null>(null);
+  const cameraRafRef = useRef<number | null>(null);
+  const cameraSliceRef = useRef<HTMLCanvasElement | null>(null);
+
+  async function startCameraReader() {
+    stopLiveSound();
+    stopOpticalSound();
+    if (cameraChainRef.current) return;
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+    } catch (err) {
+      alert("Caméra inaccessible : " + (err instanceof Error ? err.message : String(err)));
+      return;
+    }
+    cameraStreamRef.current = stream;
+    const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
+    try { await actx.resume(); } catch { /* noop */ }
+    cameraChainRef.current = buildLiveChain(actx);
+    if (!cameraSliceRef.current) {
+      const sc = document.createElement("canvas");
+      sc.width = 1;
+      sc.height = LIVE_ROWS;
+      cameraSliceRef.current = sc;
+    }
+    setCameraReader(true);
+
+    const tick = () => {
+      const chain = cameraChainRef.current;
+      const video = cameraVideoRef.current;
+      const slice = cameraSliceRef.current;
+      const ctx2 = audioCtxRef.current;
+      if (!chain) return;
+      if (video && slice && ctx2 && video.readyState >= 2 && video.videoWidth > 0) {
+        const sctx = slice.getContext("2d")!;
+        // Average an 8px-wide central band of the camera into a 1×64 column
+        const sx = Math.max(0, Math.floor(video.videoWidth / 2) - 4);
+        sctx.imageSmoothingEnabled = true;
+        sctx.drawImage(video, sx, 0, 8, video.videoHeight, 0, 0, 1, LIVE_ROWS);
+        const px = sctx.getImageData(0, 0, 1, LIVE_ROWS).data;
+        // Per-band HSL decomposition (same mapping as the canvas engine)
+        const amps = new Float32Array(4 * LIVE_ROWS);
+        let minInk = 1;
+        const inks = new Float32Array(LIVE_ROWS);
+        for (let r = 0; r < LIVE_ROWS; r++) {
+          const rr = px[r * 4] / 255, gg = px[r * 4 + 1] / 255, bb = px[r * 4 + 2] / 255;
+          const lum = 0.2126 * rr + 0.7152 * gg + 0.0722 * bb;
+          const ink = 1 - lum;
+          inks[r] = ink;
+          if (ink < minInk) minInk = ink;
+        }
+        for (let r = 0; r < LIVE_ROWS; r++) {
+          // Ambient-light compensation: subtract the column's floor so a
+          // dim room doesn't read as a wall of sound
+          const ink = Math.max(0, (inks[r] - minInk) * 1.6);
+          if (ink < 0.03) continue;
+          const rr = px[r * 4] / 255, gg = px[r * 4 + 1] / 255, bb = px[r * 4 + 2] / 255;
+          const max = Math.max(rr, gg, bb), min = Math.min(rr, gg, bb);
+          const d = max - min;
+          const l = (max + min) / 2;
+          const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1) || 1);
+          const ws = sat < 0.15 ? 0 : Math.min(1, (sat - 0.15) / 0.6);
+          amps[0 * LIVE_ROWS + r] = ink * (1 - ws); // sine
+          if (ws > 0) {
+            let h = 0;
+            if (d !== 0) {
+              if (max === rr) h = 60 * (((gg - bb) / d) % 6);
+              else if (max === gg) h = 60 * ((bb - rr) / d + 2);
+              else h = 60 * ((rr - gg) / d + 4);
+              if (h < 0) h += 360;
+            }
+            const wAmp = ink * ws;
+            if (h < 90 || h >= 330) amps[1 * LIVE_ROWS + r] = wAmp;      // saw
+            else if (h < 210) amps[2 * LIVE_ROWS + r] = wAmp;            // tri
+            else amps[3 * LIVE_ROWS + r] = wAmp;                          // sqr
+          }
+        }
+        const now = ctx2.currentTime;
+        for (let w = 0; w < 4; w++) {
+          for (let r = 0; r < LIVE_ROWS; r++) {
+            const a = amps[w * LIVE_ROWS + r];
+            const k = w * LIVE_ROWS + r;
+            if (Math.abs(a - chain.lastAmps[k]) > 0.004) {
+              chain.gains[w][r].gain.setTargetAtTime(a, now, 0.02);
+              chain.lastAmps[k] = a;
+            }
+          }
+        }
+      }
+      cameraRafRef.current = requestAnimationFrame(tick);
+    };
+    cameraRafRef.current = requestAnimationFrame(tick);
+  }
+
+  function stopCameraReader() {
+    if (cameraRafRef.current != null) { cancelAnimationFrame(cameraRafRef.current); cameraRafRef.current = null; }
+    if (cameraChainRef.current) {
+      teardownLiveChain(cameraChainRef.current);
+      cameraChainRef.current = null;
+    }
+    cameraStreamRef.current?.getTracks().forEach(t => { try { t.stop(); } catch { /* noop */ } });
+    cameraStreamRef.current = null;
+    setCameraReader(false);
+  }
+
+  // Attach the camera stream to the preview video element once rendered
+  useEffect(() => {
+    if (cameraReader && cameraVideoRef.current && cameraStreamRef.current) {
+      cameraVideoRef.current.srcObject = cameraStreamRef.current;
+      void cameraVideoRef.current.play().catch(() => { /* autoplay quirk */ });
+    }
+  }, [cameraReader]);
+
+  // Full teardown on unmount
+  useEffect(() => () => {
+    if (cameraRafRef.current != null) cancelAnimationFrame(cameraRafRef.current);
+    cameraChainRef.current?.oscs.forEach(bank => bank.forEach(o => { try { o.stop(); } catch { /* noop */ } }));
+    cameraStreamRef.current?.getTracks().forEach(t => { try { t.stop(); } catch { /* noop */ } });
+  }, []);
+
   // ---- TAPISSERIE — the whole animation as one immense score strip ----
   // Bayeux-style: every frame side by side on a linen ground, with a
   // footer band carrying the DRAWN WAVEFORM of the optical soundtrack
@@ -1325,12 +1457,17 @@ export default function Editor() {
     return g;
   }
 
-  function startLiveSound() {
-    stopOpticalSound(); // one-shot playback off — the live bank takes over
-    if (liveChainRef.current) return;
-    const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
-    void actx.resume();
-    const comp = actx.createDynamicsCompressor(); // soft-limits dense drawings
+  // Shared 4-wave × 64-band oscillator chain builder (SPECTRO LIVE + the
+  // camera optical reader both drive one of these).
+  type LiveChain = {
+    oscs: OscillatorNode[][];
+    gains: GainNode[][];
+    master: GainNode;
+    comp: DynamicsCompressorNode;
+    lastAmps: Float32Array;
+  };
+  function buildLiveChain(actx: AudioContext): LiveChain {
+    const comp = actx.createDynamicsCompressor(); // soft-limits dense input
     const master = actx.createGain();
     master.gain.value = 0.22;
     master.connect(comp);
@@ -1369,7 +1506,27 @@ export default function Editor() {
       oscs.push(wOscs);
       gains.push(wGains);
     }
-    liveChainRef.current = { oscs, gains, master, comp, lastAmps: new Float32Array(LIVE_WAVES.length * LIVE_ROWS) };
+    return { oscs, gains, master, comp, lastAmps: new Float32Array(LIVE_WAVES.length * LIVE_ROWS) };
+  }
+
+  function teardownLiveChain(chain: LiveChain) {
+    const actx = audioCtxRef.current;
+    const now = actx?.currentTime ?? 0;
+    try { chain.master.gain.setTargetAtTime(0, now, 0.03); } catch { /* noop */ }
+    setTimeout(() => {
+      chain.oscs.forEach(bank => bank.forEach(o => { try { o.stop(); } catch { /* noop */ } }));
+      try { chain.comp.disconnect(); } catch { /* noop */ }
+      try { chain.master.disconnect(); } catch { /* noop */ }
+    }, 120);
+  }
+
+  function startLiveSound() {
+    stopOpticalSound(); // one-shot playback off — the live bank takes over
+    stopCameraReader(); // the two optical readers are exclusive
+    if (liveChainRef.current) return;
+    const actx = audioCtxRef.current ?? (audioCtxRef.current = new AudioContext());
+    void actx.resume();
+    liveChainRef.current = buildLiveChain(actx);
     liveGridsRef.current.clear();
     liveStartRef.current = actx.currentTime;
 
@@ -1427,15 +1584,7 @@ export default function Editor() {
     const chain = liveChainRef.current;
     if (liveRafRef.current != null) { cancelAnimationFrame(liveRafRef.current); liveRafRef.current = null; }
     if (chain) {
-      const actx = audioCtxRef.current;
-      const now = actx?.currentTime ?? 0;
-      try { chain.master.gain.setTargetAtTime(0, now, 0.03); } catch { /* noop */ }
-      // Stop the oscillators after the fade-out tail
-      setTimeout(() => {
-        chain.oscs.forEach(bank => bank.forEach(o => { try { o.stop(); } catch { /* noop */ } }));
-        try { chain.comp.disconnect(); } catch { /* noop */ }
-        try { chain.master.disconnect(); } catch { /* noop */ }
-      }, 120);
+      teardownLiveChain(chain);
       liveChainRef.current = null;
     }
     setLiveSound(false);
@@ -3776,6 +3925,37 @@ export default function Editor() {
       {/* SPLASH */}
       {splashOpen && <SplashScreen theme={t} onDismiss={() => setSplashOpen(false)} />}
 
+      {/* 📷 LECTEUR OPTIQUE — floating camera panel with scan line */}
+      {cameraReader && (
+        <div style={{
+          position: "fixed", right: 16, bottom: 16, zIndex: 8000,
+          background: t.panel, border: `1px solid ${t.border}`,
+          padding: 8, width: 296,
+          fontFamily: "'VT323', monospace",
+        }}>
+          <div style={{ position: "relative", width: 280, height: 158, overflow: "hidden", background: "#000" }}>
+            <video
+              ref={cameraVideoRef}
+              muted
+              playsInline
+              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+            />
+            {/* Scan line — what's under it is being read */}
+            <div style={{
+              position: "absolute", top: 0, left: "50%", width: 2, height: "100%",
+              background: t.accent, opacity: 0.9, transform: "translateX(-1px)",
+              boxShadow: `0 0 6px ${t.accent}`,
+            }} />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+            <span style={{ color: t.panelText, fontSize: 12, flex: 1, lineHeight: 1.15 }}>
+              Fais glisser la tapisserie devant la ligne — ta main est la tête de lecture.
+            </span>
+            <button className="amiga-button" onClick={stopCameraReader} style={{ padding: "2px 8px" }}>■ STOP</button>
+          </div>
+        </div>
+      )}
+
       {/* LOGIN MODAL */}
       {showLogin && (
         <LoginModal
@@ -3902,12 +4082,13 @@ export default function Editor() {
         }))} />
         <MenuDropdown label="SON" items={[
           { label: liveSound ? "🎹 SPECTRO LIVE — ARRÊTER ✓" : "🎹 SPECTRO LIVE — le son suit le dessin en direct", action: () => (liveSound ? stopLiveSound() : startLiveSound()) },
+          { label: cameraReader ? "📷 LECTEUR OPTIQUE — ARRÊTER ✓" : "📷 LECTEUR OPTIQUE — joue la tapisserie avec la caméra", action: () => (cameraReader ? stopCameraReader() : void startCameraReader()) },
           { label: voicesOn ? "🗣 VOIX (textes lus) — ON ✓" : "🗣 VOIX (textes lus) — OFF", action: () => setVoicesOn(v => !v) },
           { label: "🗑 EFFACER LES VOIX (textes mémorisés)", action: () => { if (confirm(`Effacer ${textStampsRef.current.length} texte(s) de la timeline vocale ?`)) textStampsRef.current = []; } },
           { label: "—", action: () => {} },
           { label: "▶ JOUER — SPECTRO (image = spectrogramme)", action: () => playOpticalSound("spectro") },
           { label: "▶ JOUER — DENSITÉ (piste optique McLaren)", action: () => playOpticalSound("density") },
-          { label: "■ STOP", action: () => { stopOpticalSound(); stopLiveSound(); } },
+          { label: "■ STOP", action: () => { stopOpticalSound(); stopLiveSound(); stopCameraReader(); } },
           { label: "—", action: () => {} },
           { label: "⬇ EXPORT WAV — SPECTRO", action: () => exportOpticalWav("spectro") },
           { label: "⬇ EXPORT WAV — DENSITÉ", action: () => exportOpticalWav("density") },
