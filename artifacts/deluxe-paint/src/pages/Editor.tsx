@@ -1738,6 +1738,37 @@ export default function Editor() {
   );
   const swatchSize = isCoarsePointer ? 30 : 16;
 
+  // ---- Responsive layout ----
+  // narrowUI hides the menubar title and lets rows wrap; the bottom
+  // panels are individually collapsible (chevron headers) with their
+  // state persisted — on short screens SCRATCH + CALQUES start folded.
+  // Collapsing a panel grows the canvas automatically (the FIT observer
+  // watches the canvas area).
+  const [narrowUI, setNarrowUI] = useState(() => typeof window !== "undefined" && window.innerWidth < 900);
+  useEffect(() => {
+    let t1: ReturnType<typeof setTimeout> | null = null;
+    const onResize = () => {
+      if (t1) clearTimeout(t1);
+      t1 = setTimeout(() => setNarrowUI(window.innerWidth < 900), 150);
+    };
+    window.addEventListener("resize", onResize);
+    return () => { window.removeEventListener("resize", onResize); if (t1) clearTimeout(t1); };
+  }, []);
+
+  type PanelOpen = { scratch: boolean; layers: boolean; anim: boolean; palette: boolean };
+  const [panelOpen, setPanelOpen] = useState<PanelOpen>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("dpaint-panels") || "null");
+      if (saved && typeof saved === "object") return { scratch: true, layers: true, anim: true, palette: true, ...saved };
+    } catch { /* defaults below */ }
+    const shortScreen = typeof window !== "undefined" && window.innerHeight < 760;
+    return { scratch: !shortScreen, layers: !shortScreen, anim: true, palette: true };
+  });
+  useEffect(() => {
+    try { localStorage.setItem("dpaint-panels", JSON.stringify(panelOpen)); } catch { /* noop */ }
+  }, [panelOpen]);
+  const togglePanel = (k: keyof PanelOpen) => setPanelOpen(p => ({ ...p, [k]: !p[k] }));
+
   // Text-tool state (tampon / stamp mode)
   const [textInput, setTextInput] = useState("TEXTE");
   const [textFontIdx, setTextFontIdx] = useState(0);
@@ -3977,7 +4008,7 @@ export default function Editor() {
       )}
 
       {/* MENUBAR */}
-      <div style={{ display: "flex", alignItems: "center", background: t.menubar, borderBottom: `1px solid ${t.border}`, padding: "0 4px", flexShrink: 0, height: 28 }}>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", rowGap: 2, background: t.menubar, borderBottom: `1px solid ${t.border}`, padding: "2px 4px", flexShrink: 0, minHeight: 28 }}>
         <MenuDropdown label="IMAGE" items={(() => {
           const animOk = canvasW <= ANIM_EXPORT_MAX_W;
           const animSuffix = animOk ? "" : ` — désactivé en ${canvasW}×${canvasH}`;
@@ -4139,9 +4170,11 @@ export default function Editor() {
               style={{ padding: "2px 10px", height: 24 }}
             >LOGIN</button>
           )}
-          <div style={{ color: t.menubarText, fontSize: 14, paddingRight: 8, letterSpacing: 1 }}>
-            DELUXE PAINT · PEOPLE OF VERSO
-          </div>
+          {!narrowUI && (
+            <div style={{ color: t.menubarText, fontSize: 14, paddingRight: 8, letterSpacing: 1 }}>
+              DELUXE PAINT · PEOPLE OF VERSO
+            </div>
+          )}
         </div>
       </div>
 
@@ -4565,7 +4598,17 @@ export default function Editor() {
       {/* SCRATCH / SCRUB PANEL — drag the slider to "scratch" the animation;
           if REC is on, this scratching is baked into the recorded video. */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
+        {!panelOpen.scratch ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button className="amiga-button" onClick={() => togglePanel("scratch")} title="Déplier" style={{ padding: "0 6px", fontSize: 11 }}>▸</button>
+            <span style={{ color: t.panelText, fontSize: 13, fontWeight: "bold" }}>SCRATCH · TABLE</span>
+            <span style={{ color: t.panelText, fontSize: 11, opacity: 0.6 }}>
+              {spinMode === "off" ? "fixe" : spinMode === "turn" ? "platine" : "pano"}
+            </span>
+          </div>
+        ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <button className="amiga-button" onClick={() => togglePanel("scratch")} title="Replier" style={{ padding: "0 6px", fontSize: 11 }}>▾</button>
           <span style={{ color: t.panelText, fontSize: 14, fontWeight: "bold", minWidth: 70 }}>SCRATCH :</span>
           <button
             className="amiga-button"
@@ -4653,11 +4696,22 @@ export default function Editor() {
             </>
           )}
         </div>
+        )}
       </div>
 
       {/* LAYER PANEL — calques (pistes) */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
+        {!panelOpen.layers ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button className="amiga-button" onClick={() => togglePanel("layers")} title="Déplier" style={{ padding: "0 6px", fontSize: 11 }}>▸</button>
+            <span style={{ color: t.panelText, fontSize: 13, fontWeight: "bold" }}>CALQUES</span>
+            <span style={{ color: t.panelText, fontSize: 11, opacity: 0.6 }}>
+              {layersRef.current.length} · actif : {layersRef.current[activeLayerIdx]?.name ?? "—"}
+            </span>
+          </div>
+        ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <button className="amiga-button" onClick={() => togglePanel("layers")} title="Replier" style={{ padding: "0 6px", fontSize: 11 }}>▾</button>
           <span style={{ color: t.panelText, fontSize: 14, fontWeight: "bold" }}>CALQUES :</span>
           <button className="amiga-button" onClick={addNewLayer} title="Nouveau calque au-dessus de l'actif" style={{ padding: "2px 8px" }}>+ CALQUE</button>
           <div style={{ display: "flex", gap: 4, overflowX: "auto", flex: 1, alignItems: "center" }} key={`layers-${layerVersion}`}>
@@ -4711,11 +4765,20 @@ export default function Editor() {
             })}
           </div>
         </div>
+        )}
       </div>
 
       {/* ANIMATION PANEL */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {!panelOpen.anim ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button className="amiga-button" onClick={() => togglePanel("anim")} title="Déplier" style={{ padding: "0 6px", fontSize: 11 }}>▸</button>
+            <span style={{ color: t.panelText, fontSize: 13, fontWeight: "bold" }}>ANIMATION</span>
+            <span style={{ color: t.panelText, fontSize: 11, opacity: 0.6 }}>IMG {currentFrame + 1}/{frameCount}{playing ? " · ▶" : ""}{recording ? " · ● REC" : ""}</span>
+          </div>
+        ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <button className="amiga-button" onClick={() => togglePanel("anim")} title="Replier" style={{ padding: "0 6px", fontSize: 11 }}>▾</button>
           {/* Playback controls */}
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
             <button className="amiga-button" onClick={() => switchToFrame(0)} title="DEBUT" style={{ padding: "2px 6px" }}>|◀</button>
@@ -4793,11 +4856,23 @@ export default function Editor() {
             ))}
           </div>
         </div>
+        )}
       </div>
 
       {/* PALETTE + STATUS */}
       <div className="amiga-panel" style={{ flexShrink: 0, borderTop: `1px solid ${t.border}`, padding: "4px 8px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {!panelOpen.palette ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button className="amiga-button" onClick={() => togglePanel("palette")} title="Déplier" style={{ padding: "0 6px", fontSize: 11 }}>▸</button>
+            <span style={{ color: t.panelText, fontSize: 13, fontWeight: "bold" }}>PALETTE</span>
+            <span style={{ color: t.panelText, fontSize: 11, opacity: 0.6 }}>{activePalette.label}</span>
+            <div style={{ width: 18, height: 12, background: fgColor, border: `1px solid ${t.border}` }} title="Avant" />
+            <div style={{ width: 18, height: 12, background: bgColor, border: `1px solid ${t.border}` }} title="Fond" />
+            <span style={{ color: t.panelText, fontSize: 11, opacity: 0.6 }}>{TOOLS.find(tt => tt.id === tool)?.label ?? ""}</span>
+          </div>
+        ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <button className="amiga-button" onClick={() => togglePanel("palette")} title="Replier" style={{ padding: "0 6px", fontSize: 11 }}>▾</button>
           {/* Palette */}
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <div style={{ fontSize: 10, color: t.panelText, opacity: 0.7 }}>
@@ -4844,6 +4919,7 @@ export default function Editor() {
             <div style={{ width: isCoarsePointer ? 44 : 32, height: isCoarsePointer ? 24 : 16, background: bgColor, border: `1px solid ${t.border}` }} />
           </div>
         </div>
+        )}
       </div>
     </div>
   );
