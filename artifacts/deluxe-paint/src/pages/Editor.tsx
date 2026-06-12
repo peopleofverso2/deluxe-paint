@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { GIFEncoder, quantize, applyPalette } from "gifenc";
 import { api, ApiError, type ApiUser, type ProjectListItem } from "@/lib/api";
-import { gridFromCanvas, synthDensity, encodeWav, gridFromCanvasColor, synthSpectroColor, WAVE_TRIM, WAVE_PAN, type OpticalMode, type ColorGrid } from "@/lib/opticalSound";
+import { gridFromCanvas, synthDensity, encodeWav, gridFromCanvasColor, synthSpectroColor, WAVE_TRIM, WAVE_PAN, WAVE_HARMONICS, analyzeColor, type OpticalMode, type ColorGrid } from "@/lib/opticalSound";
 
 type Tool =
   | "pencil"
@@ -1152,41 +1152,28 @@ export default function Editor() {
         sctx.imageSmoothingEnabled = true;
         sctx.drawImage(video, sx, 0, 8, video.videoHeight, 0, 0, 1, LIVE_ROWS);
         const px = sctx.getImageData(0, 0, 1, LIVE_ROWS).data;
-        // Per-band HSL decomposition (same mapping as the canvas engine)
+        // Per-band color analysis — same continuous hue→timbre wheel as
+        // the canvas engine (shared analyzeColor from the lib)
         const amps = new Float32Array(4 * LIVE_ROWS);
         let minInk = 1;
-        const inks = new Float32Array(LIVE_ROWS);
+        const cells: Array<ReturnType<typeof analyzeColor>> = [];
         for (let r = 0; r < LIVE_ROWS; r++) {
-          const rr = px[r * 4] / 255, gg = px[r * 4 + 1] / 255, bb = px[r * 4 + 2] / 255;
-          const lum = 0.2126 * rr + 0.7152 * gg + 0.0722 * bb;
-          const ink = 1 - lum;
-          inks[r] = ink;
-          if (ink < minInk) minInk = ink;
+          const cell = analyzeColor(px[r * 4] / 255, px[r * 4 + 1] / 255, px[r * 4 + 2] / 255);
+          cells.push(cell);
+          if (cell.ink < minInk) minInk = cell.ink;
         }
         for (let r = 0; r < LIVE_ROWS; r++) {
+          const cell = cells[r];
           // Ambient-light compensation: subtract the column's floor so a
           // dim room doesn't read as a wall of sound
-          const ink = Math.max(0, (inks[r] - minInk) * 1.6);
-          if (ink < 0.03) continue;
-          const rr = px[r * 4] / 255, gg = px[r * 4 + 1] / 255, bb = px[r * 4 + 2] / 255;
-          const max = Math.max(rr, gg, bb), min = Math.min(rr, gg, bb);
-          const d = max - min;
-          const l = (max + min) / 2;
-          const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1) || 1);
-          const ws = sat < 0.15 ? 0 : Math.min(1, (sat - 0.15) / 0.6);
-          amps[0 * LIVE_ROWS + r] = ink * (1 - ws); // sine
-          if (ws > 0) {
-            let h = 0;
-            if (d !== 0) {
-              if (max === rr) h = 60 * (((gg - bb) / d) % 6);
-              else if (max === gg) h = 60 * ((bb - rr) / d + 2);
-              else h = 60 * ((rr - gg) / d + 4);
-              if (h < 0) h += 360;
-            }
-            const wAmp = ink * ws;
-            if (h < 90 || h >= 330) amps[1 * LIVE_ROWS + r] = wAmp;      // saw
-            else if (h < 210) amps[2 * LIVE_ROWS + r] = wAmp;            // tri
-            else amps[3 * LIVE_ROWS + r] = wAmp;                          // sqr
+          const A = Math.max(0, (cell.ink - minInk) * 1.6);
+          if (A < 0.03) continue;
+          amps[0 * LIVE_ROWS + r] = A * (1 - cell.ws);
+          if (cell.ws > 0) {
+            const wAmp = A * cell.ws;
+            amps[1 * LIVE_ROWS + r] = wAmp * cell.w[0]; // cuivre
+            amps[2 * LIVE_ROWS + r] = wAmp * cell.w[1]; // flûte
+            amps[3 * LIVE_ROWS + r] = wAmp * cell.w[2]; // carillon
           }
         }
         const now = ctx2.currentTime;
@@ -1578,9 +1565,17 @@ export default function Editor() {
       const wOscs: OscillatorNode[] = [];
       const wGains: GainNode[] = [];
       const freqs = bandFreqs(LIVE_ROWS);
+      // Rich harmonic instrument for this bank — built from the same
+      // recipes as the offline renderer (export = what you hear)
+      const recipe = [WAVE_HARMONICS.sine, WAVE_HARMONICS.saw, WAVE_HARMONICS.tri, WAVE_HARMONICS.sqr][w];
+      const maxK = recipe[recipe.length - 1][0];
+      const real = new Float32Array(maxK + 1);
+      const imag = new Float32Array(maxK + 1);
+      for (const [k, a] of recipe) imag[k] = a;
+      const pwave = actx.createPeriodicWave(real, imag, { disableNormalization: false });
       for (let r = 0; r < LIVE_ROWS; r++) {
         const osc = actx.createOscillator();
-        osc.type = LIVE_WAVES[w];
+        osc.setPeriodicWave(pwave);
         osc.frequency.value = freqs[r];
         // Human micro-detune (±4 cents) — kills electric-organ sterility
         osc.detune.value = (Math.random() - 0.5) * 8;
@@ -4308,14 +4303,17 @@ export default function Editor() {
           {
             label: "🎨 COULEURS → TIMBRES (aide)",
             action: () => alert(
-              "Le SPECTRO lit la COULEUR :\n\n" +
-              "  Noir/gris  → SINUS (pur, centre)\n" +
-              "  Rouges     → SCIE (cuivré, gauche)\n" +
-              "  Verts      → TRIANGLE (flûté, centre-droit)\n" +
-              "  Bleus      → CARRÉ (chiptune, droite)\n\n" +
+              "Le SPECTRO lit la COULEUR — cercle continu de timbres :\n\n" +
+              "  Noir/gris   → SINUS pur (centre)\n" +
+              "  Rouge 0°    → CUIVRE (chaud, gauche)\n" +
+              "  Vert 120°   → FLÛTE (creux, centre-droit)\n" +
+              "  Bleu 240°   → CARILLON (verre, droite)\n\n" +
+              "ENTRE deux teintes = mélange continu : orange = cuivre flûté,\n" +
+              "violet = carillon cuivré, turquoise = flûte cristalline…\n" +
+              "CHAQUE couleur a son propre son.\n\n" +
               "Saturation = dose de caractère (pastel ≈ sinus, saturé = plein timbre).\n" +
-              "Hauteur : grave en bas du canvas, aigu en haut (C2 → C8).\n" +
-              "Essaie une ligne rouge + une ligne bleue à des hauteurs différentes : accord stéréo !"
+              "Hauteur : grave en bas, aigu en haut (C2 → C8).\n" +
+              "Astuce : 🎛 RÉGLAGES SON → GAMME penta pour que tout sonne juste."
             ),
           },
         ]} />

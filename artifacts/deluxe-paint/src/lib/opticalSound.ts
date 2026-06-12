@@ -230,8 +230,56 @@ export function encodeWav(channels: Float32Array | Float32Array[], sampleRate: n
 export const WAVE_NAMES = ["sine", "saw", "tri", "sqr"] as const;
 export type WaveName = (typeof WAVE_NAMES)[number];
 // Per-wave loudness trims (perceptual balance) + stereo pan positions
-export const WAVE_TRIM: Record<WaveName, number> = { sine: 1.0, saw: 0.55, tri: 0.9, sqr: 0.45 };
+export const WAVE_TRIM: Record<WaveName, number> = { sine: 1.0, saw: 0.5, tri: 0.95, sqr: 0.6 };
 export const WAVE_PAN: Record<WaveName, number> = { sine: 0, saw: -0.35, tri: 0.12, sqr: 0.35 };
+
+// Harmonic recipes — the actual INSTRUMENTS behind the three hue anchors.
+// [partial, amplitude] pairs; used identically by the live PeriodicWaves
+// and the offline additive renderer (what you export = what you hear).
+//   saw → CUIVRE    warm descending harmonics (brass-like)
+//   tri → FLÛTE     hollow fundamental + soft odd partials
+//   sqr → CARILLON  sparse high partials (glass / bell)
+export const WAVE_HARMONICS: Record<WaveName, Array<[number, number]>> = {
+  sine: [[1, 1]],
+  saw:  [[1, 1], [2, 0.55], [3, 0.35], [4, 0.25], [5, 0.16], [6, 0.10]],
+  tri:  [[1, 1], [2, 0.12], [3, 0.22], [5, 0.06]],
+  sqr:  [[1, 0.8], [4, 0.5], [7, 0.35], [10, 0.22], [13, 0.12]],
+};
+
+// CONTINUOUS hue→timbre wheel: anchors at 0° (cuivre), 120° (flûte),
+// 240° (carillon); any hue is an angular crossfade of its two
+// neighbours — orange is a fluty brass, violet a brassy bell, teal a
+// crystalline flute. Every color gets its own mix.
+export function hueWaveWeights(h: number): [number, number, number] {
+  const dist = (a: number) => {
+    let x = Math.abs(h - a) % 360;
+    if (x > 180) x = 360 - x;
+    return x;
+  };
+  const raw = [dist(0), dist(120), dist(240)].map(x => Math.max(0, 1 - x / 120));
+  const s = raw[0] + raw[1] + raw[2] || 1;
+  return [raw[0] / s, raw[1] / s, raw[2] / s];
+}
+
+// Full per-pixel analysis: ink (darkness), ws (character amount from
+// saturation), w (hue crossfade weights for the 3 colored banks).
+export function analyzeColor(r: number, g: number, b: number): { ink: number; ws: number; w: [number, number, number] } {
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const ink = 1 - lum;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const d = max - min;
+  const l = (max + min) / 2;
+  const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1) || 1);
+  const ws = sat < 0.12 ? 0 : Math.min(1, (sat - 0.12) / 0.68);
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = 60 * (((g - b) / d) % 6);
+    else if (max === g) h = 60 * ((b - r) / d + 2);
+    else h = 60 * ((r - g) / d + 4);
+    if (h < 0) h += 360;
+  }
+  return { ink, ws, w: ws > 0 ? hueWaveWeights(h) : [0, 0, 0] };
+}
 
 export type ColorGrid = {
   cols: number;
@@ -261,42 +309,33 @@ export function gridFromCanvasColor(frame: HTMLCanvasElement, cols: number, rows
   const sqr = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const r = data[i * 4] / 255, g = data[i * 4 + 1] / 255, b = data[i * 4 + 2] / 255;
-    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    const ink = 1 - lum;
+    const { ink, ws, w } = analyzeColor(r, g, b);
     if (ink < 0.02) continue;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    const d = max - min;
-    const l = (max + min) / 2;
-    const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1) || 1);
-    // Character amount: dead zone under 0.12 sat, full at ~0.8
-    const ws = sat < 0.12 ? 0 : Math.min(1, (sat - 0.12) / 0.68);
     sine[i] = ink * (1 - ws);
     if (ws > 0) {
-      // Hue in degrees
-      let h: number;
-      if (d === 0) h = 0;
-      else if (max === r) h = 60 * (((g - b) / d) % 6);
-      else if (max === g) h = 60 * ((b - r) / d + 2);
-      else h = 60 * ((r - g) / d + 4);
-      if (h < 0) h += 360;
       const wAmp = ink * ws;
-      if (h < 90 || h >= 330) saw[i] = wAmp;       // reds / oranges / yellows
-      else if (h < 210) tri[i] = wAmp;             // greens / cyans
-      else sqr[i] = wAmp;                          // blues / violets
+      // Continuous crossfade — every hue is its own blend of the three
+      // instruments (cuivre / flûte / carillon)
+      saw[i] = wAmp * w[0];
+      tri[i] = wAmp * w[1];
+      sqr[i] = wAmp * w[2];
     }
   }
   return { cols, rows, sine, saw, tri, sqr };
 }
 
-// Naive waveform value at phase p (0..2π). The slight aliasing of naive
-// saw/square at high pitches IS the retro Amiga character.
+// Waveform value from the harmonic recipes — partial sums, identical
+// timbres to the live PeriodicWaves (export = what you hear). Normalized
+// so each instrument peaks near ±1.
+const RECIPES: Array<Array<[number, number]>> = [
+  WAVE_HARMONICS.sine, WAVE_HARMONICS.saw, WAVE_HARMONICS.tri, WAVE_HARMONICS.sqr,
+];
+const RECIPE_NORM = RECIPES.map(rec => 1 / rec.reduce((s, [, a]) => s + a, 0));
 function waveValue(w: number, p: number): number {
-  switch (w) {
-    case 0: return Math.sin(p);
-    case 1: return p / Math.PI - 1;                          // saw
-    case 2: return p < Math.PI ? -1 + (2 * p) / Math.PI : 3 - (2 * p) / Math.PI; // tri
-    default: return p < Math.PI ? 1 : -1;                    // sqr
-  }
+  const rec = RECIPES[w];
+  let v = 0;
+  for (let i = 0; i < rec.length; i++) v += rec[i][1] * Math.sin(rec[i][0] * p);
+  return v * RECIPE_NORM[w];
 }
 const TWO_PI = Math.PI * 2;
 
