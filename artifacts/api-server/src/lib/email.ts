@@ -6,7 +6,7 @@ import { logger } from "./logger";
 export async function sendMagicLink(email: string, link: string): Promise<void> {
   const apiKey = process.env["BREVO_API_KEY"];
   const fromEmail = process.env["MAIL_FROM_EMAIL"] || "noreply@deluxe-paint.app";
-  const fromName  = process.env["MAIL_FROM_NAME"]  || "Deluxe Paint";
+  const fromName  = process.env["MAIL_FROM_NAME"]  || "Sonic Paint";
 
   if (!apiKey) {
     logger.warn({ email, link }, "BREVO_API_KEY unset — magic link logged instead of emailed");
@@ -25,10 +25,10 @@ export async function sendMagicLink(email: string, link: string): Promise<void> 
     body: JSON.stringify({
       sender: { email: fromEmail, name: fromName },
       to: [{ email }],
-      subject: "Connexion à Deluxe Paint",
+      subject: "Connexion à Sonic Paint",
       htmlContent: `
         <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 480px; padding: 32px; color: #111;">
-          <h1 style="font-size: 22px; margin: 0 0 16px;">Deluxe Paint · People of Verso</h1>
+          <h1 style="font-size: 22px; margin: 0 0 16px;">Sonic Paint · People of Verso</h1>
           <p>Clique le bouton pour te connecter (le lien expire dans 15 minutes) :</p>
           <p style="margin: 24px 0;">
             <a href="${link}"

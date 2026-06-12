@@ -30,7 +30,7 @@ async function api<T = unknown>(method: string, path: string, body?: unknown): P
 
 // ---- Server ---------------------------------------------------------
 const server = new McpServer({
-  name: "deluxe-paint",
+  name: "sonic-paint",
   version: "0.1.0",
 });
 

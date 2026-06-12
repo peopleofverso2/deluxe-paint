@@ -959,7 +959,7 @@ export default function Editor() {
   function exportOpticalWav(mode: OpticalMode) {
     const { channels, sampleRate } = buildOpticalSamples(mode);
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    downloadBlob(encodeWav(channels, sampleRate), `dpaint-son-optique-${mode}-${ts}.wav`);
+    downloadBlob(encodeWav(channels, sampleRate), `sonic-paint-son-optique-${mode}-${ts}.wav`);
   }
 
   // ---- EXPORT VIDÉO — automated render with the optical soundtrack ----
@@ -1073,7 +1073,7 @@ export default function Editor() {
       try { silence.stop(); } catch { /* noop */ }
       const blob = new Blob(chunks, { type: actualMime });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      downloadBlob(blob, `dpaint-video-${mode}-${ts}.${ext}`);
+      downloadBlob(blob, `sonic-paint-video-${mode}-${ts}.${ext}`);
       exportingVideoRef.current = false;
     };
 
@@ -1341,7 +1341,7 @@ export default function Editor() {
     const blob = await new Promise<Blob | null>(resolve => c.toBlob(resolve, "image/png"));
     if (!blob) { alert("Export tapisserie impossible (canvas trop grand ?)"); return; }
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    downloadBlob(blob, `dpaint-tapisserie-${ts}.png`);
+    downloadBlob(blob, `sonic-paint-tapisserie-${ts}.png`);
   }
 
   // ---- VOIX — playhead-triggered speech from TEXT stamps ----
@@ -2519,7 +2519,7 @@ export default function Editor() {
       const a = document.createElement("a");
       a.href = url;
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      a.download = `dpaint-session-${ts}.${ext}`;
+      a.download = `sonic-paint-session-${ts}.${ext}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -3937,7 +3937,7 @@ export default function Editor() {
     // voice timeline (textStamps).
     const data = buildProjectPayload();
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    downloadBlob(new Blob([JSON.stringify(data)], { type: "application/json" }), `dpaint-project-${ts}.dpaint`);
+    downloadBlob(new Blob([JSON.stringify(data)], { type: "application/json" }), `sonic-paint-project-${ts}.dpaint`);
   }
 
   function handleOpenProject() {
@@ -4024,7 +4024,7 @@ export default function Editor() {
     // Re-wrap into a fresh ArrayBuffer to satisfy the BlobPart type (gifenc
     // returns a Uint8Array<ArrayBufferLike> which TS narrows incorrectly).
     const buf = new Uint8Array(bytes).buffer;
-    downloadBlob(new Blob([buf], { type: "image/gif" }), `dpaint-anim-${ts}.gif`);
+    downloadBlob(new Blob([buf], { type: "image/gif" }), `sonic-paint-anim-${ts}.gif`);
   }
 
   function handleSaveAnimSvg() {
@@ -4033,7 +4033,7 @@ export default function Editor() {
     const baked: ImageData[] = Array.from({ length: n }, (_, i) => compositeFrameToImageData(i));
     const svg = framesToAnimatedSvg(baked, canvasW, canvasH, fps, looping);
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `dpaint-anim-${ts}.svg`);
+    downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `sonic-paint-anim-${ts}.svg`);
   }
 
   const canvasStyle: React.CSSProperties = {
@@ -4351,7 +4351,7 @@ export default function Editor() {
           )}
           {!narrowUI && (
             <div style={{ color: t.menubarText, fontSize: 14, paddingRight: 8, letterSpacing: 1 }}>
-              DELUXE PAINT · PEOPLE OF VERSO
+              SONIC PAINT · PEOPLE OF VERSO
             </div>
           )}
         </div>
@@ -5425,7 +5425,7 @@ function SplashScreen({ theme: t, onDismiss }: { theme: ThemeColors; onDismiss: 
         lineHeight: 1,
         animation: "splashPulse 1.4s ease-in-out infinite",
       }}>
-        DELUXE PAINT
+        SONIC PAINT
       </div>
 
       <div style={{

@@ -13,7 +13,7 @@
  *
  * Bump CACHE_VERSION to force-flush every client cache on next visit.
  */
-const CACHE_VERSION = "dpaint-v1";
+const CACHE_VERSION = "sonicpaint-v1"; // bumped at the Sonic Paint rebrand — flushes old caches
 const SHELL = ["/", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {

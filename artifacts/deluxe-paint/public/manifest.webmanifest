@@ -1,7 +1,7 @@
 {
-  "name": "Deluxe Paint · People of Verso",
-  "short_name": "Deluxe Paint",
-  "description": "Éditeur pixel-art & animation — calques, platine spin-art, panorama en boucle, exports PNG/SVG/GIF.",
+  "name": "Sonic Paint · People of Verso",
+  "short_name": "Sonic Paint",
+  "description": "Dessine le son — pixel-art, animation, synthèse optique (chaque couleur a son timbre), platine spin-art, tapisserie-partition, lecture caméra.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

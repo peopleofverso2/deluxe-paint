@@ -1,6 +1,6 @@
 # dpaint-mcp
 
-MCP server for the [Deluxe Paint · People of Verso](https://deluxe-paint-865031348985.europe-west9.run.app) app.
+MCP server for the [Sonic Paint · People of Verso](https://deluxe-paint-865031348985.europe-west9.run.app) app.
 
 Lets Claude / Cursor / any MCP client list, fetch, create, update and
 delete your saved animation projects, plus render frame previews so the
