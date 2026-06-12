@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { GIFEncoder, quantize, applyPalette } from "gifenc";
 import { api, ApiError, type ApiUser, type ProjectListItem } from "@/lib/api";
-import { gridFromCanvas, synthDensity, encodeWav, gridFromCanvasColor, synthSpectroColor, WAVE_TRIM, WAVE_PAN, WAVE_HARMONICS, analyzeColor, type OpticalMode, type ColorGrid } from "@/lib/opticalSound";
+import { gridFromCanvas, synthDensity, encodeWav, gridFromCanvasColor, synthSpectroColor, COCKTAILS, cocktailById, cocktailInstruments, analyzeColor, type OpticalMode, type ColorGrid } from "@/lib/opticalSound";
+import qrcode from "qrcode-generator";
 
 type Tool =
   | "pencil"
@@ -146,6 +147,20 @@ const PALETTES = [
   { id: "dada",    label: "DADA",     colors: DADA_PALETTE,    width: 8 },
 ] as const;
 type PaletteId = (typeof PALETTES)[number]["id"];
+
+// Each color palette pours its own instrument cocktail — picking a
+// palette re-seats the optical sound to match its visual era / mood.
+// (Manual override stays available in the 🎛 panel.)
+const PALETTE_COCKTAIL: Record<PaletteId, string> = {
+  amiga: "classique",
+  c64: "console",
+  pico8: "console",
+  gameboy: "console",
+  pastel: "cristal",
+  neon: "club",
+  bauhaus: "machine",
+  dada: "bricolage",
+};
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -851,6 +866,9 @@ export default function Editor() {
   const [paletteId, setPaletteId] = useState<PaletteId>("amiga");
   const [theme, setTheme] = useState<"light" | "night">("light");
   const [splashOpen, setSplashOpen] = useState(true);
+  // ?lecteur=1 (tapestry QR scan) — offer to start the optical camera
+  // reader behind one tap (camera + audio need a user gesture anyway)
+  const [tapestryPrompt, setTapestryPrompt] = useState(false);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
   // RAF-throttled mousePos: pointer events fire at 60-120 Hz and every
   // setMousePos triggers a React render (whose layout-effect recomposites
@@ -925,6 +943,7 @@ export default function Editor() {
       const [L, R] = synthSpectroColor(grids, frameDur, sampleRate, {
         freqs: bandFreqs(64),
         gamma: soundTuningRef.current.gamma,
+        cocktail: cocktailById(soundTuningRef.current.cocktail),
       });
       return { channels: [L, R], sampleRate };
     }
@@ -1171,9 +1190,9 @@ export default function Editor() {
           amps[0 * LIVE_ROWS + r] = A * (1 - cell.ws);
           if (cell.ws > 0) {
             const wAmp = A * cell.ws;
-            amps[1 * LIVE_ROWS + r] = wAmp * cell.w[0]; // cuivre
-            amps[2 * LIVE_ROWS + r] = wAmp * cell.w[1]; // flûte
-            amps[3 * LIVE_ROWS + r] = wAmp * cell.w[2]; // carillon
+            amps[1 * LIVE_ROWS + r] = wAmp * cell.w[0]; // anchor 0°
+            amps[2 * LIVE_ROWS + r] = wAmp * cell.w[1]; // anchor 120°
+            amps[3 * LIVE_ROWS + r] = wAmp * cell.w[2]; // anchor 240°
           }
         }
         const now = ctx2.currentTime;
@@ -1236,10 +1255,15 @@ export default function Editor() {
     const naturalW = n * canvasW + (n + 1) * sep;
     const footerH = Math.max(56, Math.round(canvasH * 0.2));
     const naturalH = sep + canvasH + sep + footerH + sep;
+    // Colophon: a fixed-size block at the right end carrying the QR code
+    // that reopens the app with this piece's sounds. Sized in DEVICE
+    // pixels so the QR stays crisp however much the strip is scaled.
+    const colophonW = 280;
     // Browsers cap canvas dimensions (~16k safe) — scale the whole strip
     const MAX_W = 16000, MAX_H = 8000;
-    const scale = Math.min(1, MAX_W / naturalW, MAX_H / naturalH);
-    const W = Math.max(1, Math.floor(naturalW * scale));
+    const scale = Math.min(1, (MAX_W - colophonW) / naturalW, MAX_H / naturalH);
+    const stripDevW = Math.max(1, Math.floor(naturalW * scale));
+    const W = stripDevW + colophonW;
     const H = Math.max(1, Math.floor(naturalH * scale));
     const c = document.createElement("canvas");
     c.width = W;
@@ -1269,9 +1293,10 @@ export default function Editor() {
     }
     tctx.restore();
 
-    // Footer geometry in DEVICE pixels
+    // Footer geometry in DEVICE pixels (waveform spans the frames only,
+    // not the colophon)
     const stripX = Math.round(sep * scale);
-    const stripW = W - 2 * stripX;
+    const stripW = stripDevW - 2 * stripX;
     const footTop = Math.round((sep + canvasH + sep) * scale);
     const footHpx = Math.round(footerH * scale);
     const waveTop = footTop + Math.round(footHpx * 0.18);
@@ -1337,6 +1362,53 @@ export default function Editor() {
       tctx.closePath();
       tctx.fill();
     }
+
+    // ---- Colophon: the QR that reopens the app with these very sounds.
+    // Scan the printed tapestry → Sonic Paint loads the project (if it's
+    // saved in the cloud), tunes the synth to this piece's scale +
+    // cocktail, and offers the camera reader. The partition carries its
+    // own instrumentation, like a key signature.
+    try {
+      const tun = soundTuningRef.current;
+      const son = [tun.scale, tun.root, Math.round(tun.gamma * 10), tun.smooth, tun.space, tun.cocktail].join(".");
+      const base = cloudProject ? `${window.location.origin}/p/${cloudProject.id}` : `${window.location.origin}/`;
+      const qr = qrcode(0, "M"); // type 0 = auto-size for the URL length
+      qr.addData(`${base}?son=${son}&lecteur=1`);
+      qr.make();
+      const count = qr.getModuleCount();
+      // Thin separator between the score and the colophon
+      tctx.strokeStyle = "rgba(25,25,25,0.35)";
+      tctx.beginPath();
+      tctx.moveTo(stripDevW + 0.5, Math.round(H * 0.06));
+      tctx.lineTo(stripDevW + 0.5, H - Math.round(H * 0.06));
+      tctx.stroke();
+      const quiet = 12; // QR quiet zone (white margin)
+      const qs = Math.max(48, Math.min(208, colophonW - 56, H - 150));
+      const qx = stripDevW + Math.round((colophonW - qs) / 2);
+      const qy = Math.max(quiet + 30, Math.round(H / 2 - qs / 2) - 16);
+      tctx.fillStyle = "#FFFFFF";
+      tctx.fillRect(qx - quiet, qy - quiet, qs + quiet * 2, qs + quiet * 2);
+      tctx.fillStyle = "#191919";
+      const ms = qs / count;
+      for (let r = 0; r < count; r++) {
+        for (let cc = 0; cc < count; cc++) {
+          if (qr.isDark(r, cc)) {
+            tctx.fillRect(qx + Math.round(cc * ms), qy + Math.round(r * ms), Math.ceil(ms), Math.ceil(ms));
+          }
+        }
+      }
+      tctx.fillStyle = "#191919";
+      tctx.textAlign = "center";
+      tctx.textBaseline = "alphabetic";
+      const cxm = stripDevW + colophonW / 2;
+      tctx.font = "bold 22px 'VT323', monospace";
+      tctx.fillText("SONIC PAINT", cxm, qy - quiet - 12);
+      tctx.font = "14px 'VT323', monospace";
+      tctx.fillText("scanne-moi : l'app s'ouvre", cxm, qy + qs + quiet + 20);
+      tctx.fillText("avec les sons de cette partition", cxm, qy + qs + quiet + 36);
+      tctx.fillText(`🍸 ${cocktailById(tun.cocktail).label}`, cxm, qy + qs + quiet + 58);
+      tctx.textAlign = "left";
+    } catch { /* QR optional — the strip still exports */ }
 
     const blob = await new Promise<Blob | null>(resolve => c.toBlob(resolve, "image/png"));
     if (!blob) { alert("Export tapisserie impossible (canvas trop grand ?)"); return; }
@@ -1433,13 +1505,13 @@ export default function Editor() {
     blues: [0, 3, 5, 6, 7, 10],
   };
   const NOTE_NAMES = ["DO", "DO#", "RÉ", "RÉ#", "MI", "FA", "FA#", "SOL", "SOL#", "LA", "LA#", "SI"];
-  type SoundTuning = { scale: keyof typeof SCALES; root: number; gamma: number; smooth: number; space: number };
+  type SoundTuning = { scale: keyof typeof SCALES; root: number; gamma: number; smooth: number; space: number; cocktail: string };
   const [soundTuning, setSoundTuning] = useState<SoundTuning>(() => {
     try {
       const s = JSON.parse(localStorage.getItem("dpaint-sound-tuning") || "null");
-      if (s && typeof s === "object") return { scale: "libre", root: 0, gamma: 1.6, smooth: 14, space: 25, ...s };
+      if (s && typeof s === "object") return { scale: "libre", root: 0, gamma: 1.6, smooth: 14, space: 25, cocktail: "classique", ...s };
     } catch { /* defaults */ }
-    return { scale: "libre", root: 0, gamma: 1.6, smooth: 14, space: 25 };
+    return { scale: "libre", root: 0, gamma: 1.6, smooth: 14, space: 25, cocktail: "classique" };
   });
   const soundTuningRef = useRef(soundTuning);
   useEffect(() => {
@@ -1522,12 +1594,24 @@ export default function Editor() {
   type LiveChain = {
     oscs: OscillatorNode[][];
     gains: GainNode[][];
+    buses: GainNode[];           // per-bank trim — retargeted on cocktail swap
+    panners: StereoPannerNode[]; // per-bank stereo seat — idem
     master: GainNode;
     comp: DynamicsCompressorNode;
     dry: GainNode;
     wet: GainNode;
     lastAmps: Float32Array;
   };
+  // The 4 PeriodicWaves of the active cocktail (neutral + 3 hue anchors)
+  function cocktailWaves(actx: AudioContext): PeriodicWave[] {
+    return cocktailInstruments(cocktailById(soundTuningRef.current.cocktail)).map(inst => {
+      const maxK = inst.harmonics.reduce((m, [k]) => Math.max(m, k), 1);
+      const real = new Float32Array(maxK + 1);
+      const imag = new Float32Array(maxK + 1);
+      for (const [k, a] of inst.harmonics) imag[k] = a;
+      return actx.createPeriodicWave(real, imag, { disableNormalization: false });
+    });
+  }
   function buildLiveChain(actx: AudioContext): LiveChain {
     const comp = actx.createDynamicsCompressor(); // soft-limits dense input
     const master = actx.createGain();
@@ -1550,32 +1634,30 @@ export default function Editor() {
     if (recAudioDestRef.current) {
       try { comp.connect(recAudioDestRef.current); } catch { /* noop */ }
     }
-    const trims = [WAVE_TRIM.sine, WAVE_TRIM.saw, WAVE_TRIM.tri, WAVE_TRIM.sqr];
-    const pans  = [WAVE_PAN.sine,  WAVE_PAN.saw,  WAVE_PAN.tri,  WAVE_PAN.sqr];
+    // Instruments seated by the active cocktail — same recipes as the
+    // offline renderer (export = what you hear)
+    const insts = cocktailInstruments(cocktailById(soundTuningRef.current.cocktail));
+    const waves = cocktailWaves(actx);
     const oscs: OscillatorNode[][] = [];
     const gains: GainNode[][] = [];
+    const buses: GainNode[] = [];
+    const panners: StereoPannerNode[] = [];
     for (let w = 0; w < LIVE_WAVES.length; w++) {
-      // Per-wave bus: trim → stereo position → master
+      // Per-bank bus: trim → stereo position → master
       const bus = actx.createGain();
-      bus.gain.value = trims[w];
+      bus.gain.value = insts[w].trim;
       const panner = actx.createStereoPanner();
-      panner.pan.value = pans[w];
+      panner.pan.value = insts[w].pan;
       bus.connect(panner);
       panner.connect(master);
+      buses.push(bus);
+      panners.push(panner);
       const wOscs: OscillatorNode[] = [];
       const wGains: GainNode[] = [];
       const freqs = bandFreqs(LIVE_ROWS);
-      // Rich harmonic instrument for this bank — built from the same
-      // recipes as the offline renderer (export = what you hear)
-      const recipe = [WAVE_HARMONICS.sine, WAVE_HARMONICS.saw, WAVE_HARMONICS.tri, WAVE_HARMONICS.sqr][w];
-      const maxK = recipe[recipe.length - 1][0];
-      const real = new Float32Array(maxK + 1);
-      const imag = new Float32Array(maxK + 1);
-      for (const [k, a] of recipe) imag[k] = a;
-      const pwave = actx.createPeriodicWave(real, imag, { disableNormalization: false });
       for (let r = 0; r < LIVE_ROWS; r++) {
         const osc = actx.createOscillator();
-        osc.setPeriodicWave(pwave);
+        osc.setPeriodicWave(waves[w]);
         osc.frequency.value = freqs[r];
         // Human micro-detune (±4 cents) — kills electric-organ sterility
         osc.detune.value = (Math.random() - 0.5) * 8;
@@ -1590,27 +1672,36 @@ export default function Editor() {
       oscs.push(wOscs);
       gains.push(wGains);
     }
-    return { oscs, gains, master, comp, dry, wet, lastAmps: new Float32Array(LIVE_WAVES.length * LIVE_ROWS) };
+    return { oscs, gains, buses, panners, master, comp, dry, wet, lastAmps: new Float32Array(LIVE_WAVES.length * LIVE_ROWS) };
   }
 
-  // Live re-tune + reverb amount: scale/root changes glissando the
-  // running oscillators; ESPACE adjusts wet/dry without rebuild.
+  // Live re-tune + reverb + COCKTAIL swap: scale/root changes glissando
+  // the running oscillators; ESPACE adjusts wet/dry; changing cocktail
+  // re-seats all four banks (new PeriodicWaves + trims + pans) without
+  // rebuild — the timbre morphs mid-note.
   useEffect(() => {
     const actx = audioCtxRef.current;
     if (!actx) return;
     const now = actx.currentTime;
     const freqs = bandFreqs(LIVE_ROWS);
+    const waves = cocktailWaves(actx);
+    const insts = cocktailInstruments(cocktailById(soundTuning.cocktail));
     for (const chain of [liveChainRef.current, cameraChainRef.current]) {
       if (!chain) continue;
-      chain.oscs.forEach(bank => bank.forEach((o, r) => {
+      chain.oscs.forEach((bank, w) => bank.forEach((o, r) => {
         try { o.frequency.setTargetAtTime(freqs[r], now, 0.06); } catch { /* noop */ }
+        try { o.setPeriodicWave(waves[w]); } catch { /* noop */ }
       }));
+      insts.forEach((inst, w) => {
+        try { chain.buses[w].gain.setTargetAtTime(inst.trim, now, 0.05); } catch { /* noop */ }
+        try { chain.panners[w].pan.setTargetAtTime(inst.pan, now, 0.05); } catch { /* noop */ }
+      });
       const space = soundTuning.space / 100;
       try { chain.wet.gain.setTargetAtTime(space, now, 0.05); } catch { /* noop */ }
       try { chain.dry.gain.setTargetAtTime(1 - space * 0.5, now, 0.05); } catch { /* noop */ }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [soundTuning.scale, soundTuning.root, soundTuning.space]);
+  }, [soundTuning.scale, soundTuning.root, soundTuning.space, soundTuning.cocktail]);
 
   function teardownLiveChain(chain: LiveChain) {
     const actx = audioCtxRef.current;
@@ -1819,14 +1910,47 @@ export default function Editor() {
   useEffect(() => {
     api.me().then(r => setCurrentUser(r.user)).catch(() => setCurrentUser(null));
   }, []);
+  // ---- Tapestry QR deep-link ----
+  // ?son=scale.root.gamma×10.smooth.space.cocktail tunes the synth to the
+  // exact sounds the piece was composed with; &lecteur=1 proposes the
+  // optical camera reader. Printed on every tapestry export as a QR.
+  function applySoundParam(): boolean {
+    const son = new URLSearchParams(window.location.search).get("son");
+    if (!son) return false;
+    const p = son.split(".");
+    setSoundTuning(s => ({
+      ...s,
+      ...(p[0] && p[0] in SCALES ? { scale: p[0] as keyof typeof SCALES } : {}),
+      ...(Number.isFinite(Number(p[1])) ? { root: Math.max(0, Math.min(11, Math.round(Number(p[1])))) } : {}),
+      ...(Number.isFinite(Number(p[2])) ? { gamma: Math.max(0.5, Math.min(3, Number(p[2]) / 10)) } : {}),
+      ...(Number.isFinite(Number(p[3])) ? { smooth: Math.max(5, Math.min(150, Math.round(Number(p[3])))) } : {}),
+      ...(Number.isFinite(Number(p[4])) ? { space: Math.max(0, Math.min(100, Math.round(Number(p[4])))) } : {}),
+      ...(p[5] && COCKTAILS.some(c => c.id === p[5]) ? { cocktail: p[5] } : {}),
+    }));
+    return true;
+  }
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tuned = applySoundParam();
+    if (params.get("lecteur") === "1") {
+      setSplashOpen(false);
+      setTapestryPrompt(true);
+    } else if (tuned) {
+      setSplashOpen(false); // arrive directly on the tuned instrument
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // If the URL is /p/:id, fetch and load that project on mount
   useEffect(() => {
     const m = window.location.pathname.match(/^\/p\/([A-Za-z0-9-]+)/);
     if (!m) return;
     const id = m[1];
-    api.getProject(id).then(r => {
-      loadProjectData(r.project.data, r.project.name);
+    api.getProject(id).then(async r => {
+      await loadProjectData(r.project.data, r.project.name);
       setCloudProject({ id: r.project.id, name: r.project.name, ownerId: r.project.ownerId });
+      // The payload restored its own soundTuning — a ?son= param (QR
+      // scan) takes precedence over it
+      applySoundParam();
     }).catch(err => {
       console.error("Failed to load shared project:", err);
       // Reset URL so subsequent navigation isn't stuck on a broken /p/:id
@@ -3805,6 +3929,9 @@ export default function Editor() {
       // Voice timeline events (TEXT-tool stamps) — optional field, older
       // loaders pass it through harmlessly
       textStamps: textStampsRef.current,
+      // Sound tuning travels with the piece: opening a shared /p/:id link
+      // (or the tapestry QR) restores its scale + cocktail + envelope
+      soundTuning: soundTuningRef.current,
     };
   }
 
@@ -3818,6 +3945,7 @@ export default function Editor() {
       layers?: Array<{ id?: string; name?: string; visible?: boolean; opacity?: number; frames: (string | null)[] }>;
       frames?: (string | null)[];
       textStamps?: Array<{ frame: number; x: number; y: number; color: string; text: string }>;
+      soundTuning?: Partial<SoundTuning>;
     };
     if (d.format !== "dpaint-project") throw new Error("Format inconnu (attendu : dpaint-project)");
     const targetW = typeof d.width === "number" && d.width > 0 ? d.width : canvasW;
@@ -3881,6 +4009,20 @@ export default function Editor() {
     textStampsRef.current = Array.isArray(d.textStamps)
       ? d.textStamps.filter(st => typeof st?.text === "string" && typeof st?.frame === "number" && st.frame >= 0 && st.frame < n)
       : [];
+    // Restore the piece's sound tuning (scale, cocktail, envelope…) — a
+    // ?son= URL param wins over the payload (applied after load on boot)
+    if (d.soundTuning && typeof d.soundTuning === "object") {
+      const st = d.soundTuning;
+      setSoundTuning(s => ({
+        ...s,
+        ...(typeof st.scale === "string" && st.scale in SCALES ? { scale: st.scale } : {}),
+        ...(typeof st.root === "number" ? { root: Math.max(0, Math.min(11, Math.round(st.root))) } : {}),
+        ...(typeof st.gamma === "number" ? { gamma: Math.max(0.5, Math.min(3, st.gamma)) } : {}),
+        ...(typeof st.smooth === "number" ? { smooth: Math.max(5, Math.min(150, Math.round(st.smooth))) } : {}),
+        ...(typeof st.space === "number" ? { space: Math.max(0, Math.min(100, Math.round(st.space))) } : {}),
+        ...(typeof st.cocktail === "string" && COCKTAILS.some(c => c.id === st.cocktail) ? { cocktail: st.cocktail } : {}),
+      }));
+    }
     bumpLayers();
     composite();
   }
@@ -4064,6 +4206,37 @@ export default function Editor() {
       {/* SPLASH */}
       {splashOpen && <SplashScreen theme={t} onDismiss={() => setSplashOpen(false)} />}
 
+      {/* 🪡 Arrivée par QR de tapisserie — propose la lecture optique */}
+      {tapestryPrompt && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 10000,
+          background: "rgba(14,14,14,0.93)", color: "#E8DDD0",
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          gap: 18, fontFamily: "'VT323', monospace", textAlign: "center", padding: 24,
+        }}>
+          <div style={{ fontSize: 36, letterSpacing: 5 }}>🪡 PARTITION SONIC PAINT</div>
+          <div style={{ fontSize: 17, opacity: 0.78, maxWidth: 480, lineHeight: 1.45 }}>
+            Réglages sonores chargés — 🍸 {cocktailById(soundTuning.cocktail).label} ({cocktailById(soundTuning.cocktail).hint}).
+            <br />Pointe la caméra sur la tapisserie et fais-la glisser sous la ligne :
+            ta main est la tête de lecture.
+          </div>
+          <button
+            className="amiga-button"
+            style={{ fontSize: 22, padding: "12px 26px", background: "#E8DDD0", color: "#0E0E0E", border: "1px solid #E8DDD0" }}
+            onClick={() => { setTapestryPrompt(false); void startCameraReader(); }}
+          >
+            📷 LIRE LA TAPISSERIE
+          </button>
+          <button
+            className="amiga-button"
+            style={{ fontSize: 14, padding: "5px 16px", background: "transparent", color: "#E8DDD0", border: "1px solid #555", opacity: 0.8 }}
+            onClick={() => setTapestryPrompt(false)}
+          >
+            ✕ JUSTE DESSINER
+          </button>
+        </div>
+      )}
+
       {/* 🎛 RÉGLAGES SON — floating tuning panel */}
       {showSoundSettings && (
         <div style={{
@@ -4077,6 +4250,19 @@ export default function Editor() {
             <button className="amiga-button" onClick={() => setShowSoundSettings(false)} style={{ padding: "0 8px" }}>×</button>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ minWidth: 78 }}>🍸 COCKTAIL</span>
+              <select
+                value={soundTuning.cocktail}
+                onChange={e => setSoundTuning(s => ({ ...s, cocktail: e.target.value }))}
+                style={{ flex: 1, fontFamily: "inherit", background: t.panel, color: t.panelText, border: `1px solid ${t.border}` }}
+              >
+                {COCKTAILS.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
+            </label>
+            <div style={{ fontSize: 11, opacity: 0.6, marginTop: -4, paddingLeft: 84 }}>
+              {cocktailById(soundTuning.cocktail).hint} — rouge · vert · bleu
+            </div>
             <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ minWidth: 78 }}>GAMME</span>
               <select
@@ -4283,8 +4469,8 @@ export default function Editor() {
           {aliased ? "ALIAS ON" : "ALIAS OFF"}
         </button>
         <MenuDropdown label="PALETTE" items={PALETTES.map(p => ({
-          label: `${p.label} (${p.colors.length})${p.id === paletteId ? " ✓" : ""}`,
-          action: () => setPaletteId(p.id),
+          label: `${p.label} (${p.colors.length}) 🍸 ${cocktailById(PALETTE_COCKTAIL[p.id]).label.toLowerCase()}${p.id === paletteId ? " ✓" : ""}`,
+          action: () => { setPaletteId(p.id); setSoundTuning(s => ({ ...s, cocktail: PALETTE_COCKTAIL[p.id] ?? s.cocktail })); },
         }))} />
         <MenuDropdown label="SON" items={[
           { label: liveSound ? "🎹 SPECTRO LIVE — ARRÊTER ✓" : "🎹 SPECTRO LIVE — le son suit le dessin en direct", action: () => (liveSound ? stopLiveSound() : startLiveSound()) },

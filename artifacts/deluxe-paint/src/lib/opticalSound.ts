@@ -217,34 +217,74 @@ export function encodeWav(channels: Float32Array | Float32Array[], sampleRate: n
 // ---------------------------------------------------------------------
 // COLOR → TIMBRE (MetaSynth / Amiga spirit)
 //
-// Hue picks the waveform, saturation dials how much of that character
-// blends in (grays stay pure sine — B&W drawings sound exactly as
-// before), and each waveform sits at its own stereo position:
-//
-//   grays / blacks       → SINE      (pure)        center
-//   reds / oranges       → SAW       (brassy)      left
-//   greens               → TRIANGLE  (flutey)      slight right
-//   blues / violets      → SQUARE    (chiptune)    right
+// Hue picks the instrument, saturation dials how much of that character
+// blends in (grays stay on the cocktail's NEUTRAL voice), and each
+// instrument sits at its own stereo position. The bank layout is fixed —
+// neutral + three hue anchors at 0° / 120° / 240° — but WHICH instrument
+// sits at each anchor is decided by the active COCKTAIL.
 // ---------------------------------------------------------------------
 
-export const WAVE_NAMES = ["sine", "saw", "tri", "sqr"] as const;
-export type WaveName = (typeof WAVE_NAMES)[number];
-// Per-wave loudness trims (perceptual balance) + stereo pan positions
-export const WAVE_TRIM: Record<WaveName, number> = { sine: 1.0, saw: 0.5, tri: 0.95, sqr: 0.6 };
-export const WAVE_PAN: Record<WaveName, number> = { sine: 0, saw: -0.35, tri: 0.12, sqr: 0.35 };
-
-// Harmonic recipes — the actual INSTRUMENTS behind the three hue anchors.
-// [partial, amplitude] pairs; used identically by the live PeriodicWaves
-// and the offline additive renderer (what you export = what you hear).
-//   saw → CUIVRE    warm descending harmonics (brass-like)
-//   tri → FLÛTE     hollow fundamental + soft odd partials
-//   sqr → CARILLON  sparse high partials (glass / bell)
-export const WAVE_HARMONICS: Record<WaveName, Array<[number, number]>> = {
-  sine: [[1, 1]],
-  saw:  [[1, 1], [2, 0.55], [3, 0.35], [4, 0.25], [5, 0.16], [6, 0.10]],
-  tri:  [[1, 1], [2, 0.12], [3, 0.22], [5, 0.06]],
-  sqr:  [[1, 0.8], [4, 0.5], [7, 0.35], [10, 0.22], [13, 0.12]],
+// An instrument = a harmonic recipe ([partial, amplitude] pairs — used
+// identically by the live PeriodicWaves and the offline additive
+// renderer, so what you export = what you hear), a perceptual loudness
+// trim and a stereo seat.
+export type Instrument = {
+  label: string;
+  harmonics: Array<[number, number]>;
+  trim: number;
+  pan: number;
 };
+
+export const INSTRUMENTS: Record<string, Instrument> = {
+  // The original trio + pure sine
+  sinus:    { label: "SINUS",    trim: 1.0,  pan: 0,     harmonics: [[1, 1]] },
+  cuivre:   { label: "CUIVRE",   trim: 0.5,  pan: -0.35, harmonics: [[1, 1], [2, 0.55], [3, 0.35], [4, 0.25], [5, 0.16], [6, 0.10]] },
+  flute:    { label: "FLÛTE",    trim: 0.95, pan: 0.12,  harmonics: [[1, 1], [2, 0.12], [3, 0.22], [5, 0.06]] },
+  carillon: { label: "CARILLON", trim: 0.6,  pan: 0.35,  harmonics: [[1, 0.8], [4, 0.5], [7, 0.35], [10, 0.22], [13, 0.12]] },
+  // The extended cabinet
+  orgue:    { label: "ORGUE",    trim: 0.5,  pan: -0.15, harmonics: [[1, 0.9], [2, 0.7], [3, 0.45], [4, 0.5], [6, 0.3], [8, 0.35]] },          // drawbar stack
+  corde:    { label: "CORDE",    trim: 0.45, pan: -0.3,  harmonics: [[1, 1], [2, 0.5], [3, 0.33], [4, 0.25], [5, 0.2], [6, 0.17], [7, 0.14], [8, 0.12]] }, // bowed saw
+  carre:    { label: "CARRÉ",    trim: 0.55, pan: 0.3,   harmonics: [[1, 1], [3, 0.33], [5, 0.2], [7, 0.14], [9, 0.11]] },                      // true chiptune square
+  verre:    { label: "VERRE",    trim: 0.7,  pan: 0.25,  harmonics: [[1, 0.7], [3, 0.4], [6, 0.3], [9, 0.2], [12, 0.12]] },                     // glass harmonica
+  metal:    { label: "MÉTAL",    trim: 0.5,  pan: -0.25, harmonics: [[1, 0.6], [3, 0.5], [5, 0.4], [9, 0.35], [11, 0.25], [14, 0.18]] },        // clangorous partials
+  voix:     { label: "VOIX",     trim: 0.55, pan: 0.1,   harmonics: [[1, 1], [2, 0.3], [3, 0.55], [4, 0.5], [5, 0.25], [8, 0.15], [10, 0.1]] }, // formant bumps
+  basse:    { label: "BASSE",    trim: 0.9,  pan: -0.1,  harmonics: [[1, 1], [2, 0.4], [3, 0.12]] },                                            // round sub
+  acide:    { label: "ACIDE",    trim: 0.4,  pan: 0.2,   harmonics: [[1, 0.9], [2, 0.45], [3, 0.4], [5, 0.5], [6, 0.45], [7, 0.3], [9, 0.15]] },// resonant peak
+};
+
+// A cocktail seats one instrument on the neutral (desaturated) bank and
+// three on the hue anchors 0° (reds), 120° (greens), 240° (blues). Any
+// hue between anchors is an angular crossfade — so a cocktail really is
+// a continuous timbral space, not three presets.
+export type Cocktail = {
+  id: string;
+  label: string;
+  hint: string; // "rouge · vert · bleu" seating, shown in the UI
+  neutral: string;
+  trio: [string, string, string];
+};
+
+export const COCKTAILS: Cocktail[] = [
+  { id: "classique",  label: "CLASSIQUE",  hint: "cuivre · flûte · carillon", neutral: "sinus", trio: ["cuivre", "flute", "carillon"] },
+  { id: "cathedrale", label: "CATHÉDRALE", hint: "orgue · voix · carillon",   neutral: "sinus", trio: ["orgue", "voix", "carillon"] },
+  { id: "orchestre",  label: "ORCHESTRE",  hint: "corde · flûte · cuivre",    neutral: "sinus", trio: ["corde", "flute", "cuivre"] },
+  { id: "machine",    label: "MACHINE",    hint: "carré · orgue · basse",     neutral: "sinus", trio: ["carre", "orgue", "basse"] },
+  { id: "bricolage",  label: "BRICOLAGE",  hint: "métal · acide · verre",     neutral: "sinus", trio: ["metal", "acide", "verre"] },
+  { id: "cristal",    label: "CRISTAL",    hint: "verre · carillon · flûte",  neutral: "sinus", trio: ["verre", "carillon", "flute"] },
+  { id: "club",       label: "CLUB",       hint: "basse · acide · carré",     neutral: "basse", trio: ["basse", "acide", "carre"] },
+  { id: "console",    label: "CONSOLE",    hint: "carré · sinus · verre",     neutral: "sinus", trio: ["carre", "sinus", "verre"] },
+];
+
+export function cocktailById(id: string | undefined | null): Cocktail {
+  return COCKTAILS.find(c => c.id === id) ?? COCKTAILS[0];
+}
+
+// The four seated instruments of a cocktail, in bank order
+// [neutral, anchor 0°, anchor 120°, anchor 240°].
+export function cocktailInstruments(c: Cocktail): [Instrument, Instrument, Instrument, Instrument] {
+  const pick = (id: string) => INSTRUMENTS[id] ?? INSTRUMENTS.sinus;
+  return [pick(c.neutral), pick(c.trio[0]), pick(c.trio[1]), pick(c.trio[2])];
+}
 
 // CONTINUOUS hue→timbre wheel: anchors at 0° (cuivre), 120° (flûte),
 // 240° (carillon); any hue is an angular crossfade of its two
@@ -284,7 +324,11 @@ export function analyzeColor(r: number, g: number, b: number): { ink: number; ws
 export type ColorGrid = {
   cols: number;
   rows: number;
-  // Per-wave ink intensity, rows*cols each, 0..1
+  // Per-BANK ink intensity, rows*cols each, 0..1. Field names are the
+  // historical bank names — they're positional, not timbral:
+  //   sine = neutral (desaturated), saw = anchor 0°, tri = anchor 120°,
+  //   sqr = anchor 240°. The COCKTAIL decides which instrument actually
+  //   plays each bank, so grids stay valid across cocktail changes.
   sine: Float32Array;
   saw: Float32Array;
   tri: Float32Array;
@@ -315,7 +359,7 @@ export function gridFromCanvasColor(frame: HTMLCanvasElement, cols: number, rows
     if (ws > 0) {
       const wAmp = ink * ws;
       // Continuous crossfade — every hue is its own blend of the three
-      // instruments (cuivre / flûte / carillon)
+      // anchor banks (which instruments play them = active cocktail)
       saw[i] = wAmp * w[0];
       tri[i] = wAmp * w[1];
       sqr[i] = wAmp * w[2];
@@ -324,34 +368,32 @@ export function gridFromCanvasColor(frame: HTMLCanvasElement, cols: number, rows
   return { cols, rows, sine, saw, tri, sqr };
 }
 
-// Waveform value from the harmonic recipes — partial sums, identical
-// timbres to the live PeriodicWaves (export = what you hear). Normalized
-// so each instrument peaks near ±1.
-const RECIPES: Array<Array<[number, number]>> = [
-  WAVE_HARMONICS.sine, WAVE_HARMONICS.saw, WAVE_HARMONICS.tri, WAVE_HARMONICS.sqr,
-];
-const RECIPE_NORM = RECIPES.map(rec => 1 / rec.reduce((s, [, a]) => s + a, 0));
-function waveValue(w: number, p: number): number {
-  const rec = RECIPES[w];
-  let v = 0;
-  for (let i = 0; i < rec.length; i++) v += rec[i][1] * Math.sin(rec[i][0] * p);
-  return v * RECIPE_NORM[w];
-}
 const TWO_PI = Math.PI * 2;
 
 // Color-aware additive synthesis → STEREO pair [left, right].
 // opts.freqs: per-band frequencies (row 0 = top); defaults to log C2→C8.
 // opts.gamma: amplitude response curve (>1 = more contrast, faint marks
-// whisper / bold marks roar).
+// whisper / bold marks roar). opts.cocktail seats the four instruments —
+// identical recipes to the live PeriodicWaves (export = what you hear).
 export function synthSpectroColor(
   grids: ColorGrid[],
   frameDur: number,
   sampleRate = 44100,
-  opts: { freqs?: ArrayLike<number>; gamma?: number; fMin?: number; fMax?: number } = {},
+  opts: { freqs?: ArrayLike<number>; gamma?: number; fMin?: number; fMax?: number; cocktail?: Cocktail } = {},
 ): [Float32Array, Float32Array] {
   const fMin = opts.fMin ?? 65.41;
   const fMax = opts.fMax ?? 4186.01;
   const gamma = opts.gamma ?? 1;
+  const insts = cocktailInstruments(opts.cocktail ?? COCKTAILS[0]);
+  // Per-bank partial sums normalized so each instrument peaks near ±1
+  const recipes = insts.map(i => i.harmonics);
+  const norms = recipes.map(rec => 1 / rec.reduce((s, [, a]) => s + a, 0));
+  const waveValue = (w: number, p: number): number => {
+    const rec = recipes[w];
+    let v = 0;
+    for (let i = 0; i < rec.length; i++) v += rec[i][1] * Math.sin(rec[i][0] * p);
+    return v * norms[w];
+  };
   const frameSamples = Math.max(1, Math.round(frameDur * sampleRate));
   const total = Math.max(1, grids.length * frameSamples);
   const L = new Float32Array(total);
@@ -380,11 +422,11 @@ export function synthSpectroColor(
     return p;
   });
   const waveArrs = (g: ColorGrid) => [g.sine, g.saw, g.tri, g.sqr] as const;
-  const trims = [WAVE_TRIM.sine, WAVE_TRIM.saw, WAVE_TRIM.tri, WAVE_TRIM.sqr];
-  // Equal-power pan gains per wave
+  const trims = insts.map(i => i.trim);
+  // Equal-power pan gains per bank, from each instrument's stereo seat
   const panL = new Float32Array(4), panR = new Float32Array(4);
-  [WAVE_PAN.sine, WAVE_PAN.saw, WAVE_PAN.tri, WAVE_PAN.sqr].forEach((pan, w) => {
-    const a = ((pan + 1) / 2) * (Math.PI / 2);
+  insts.forEach((inst, w) => {
+    const a = ((inst.pan + 1) / 2) * (Math.PI / 2);
     panL[w] = Math.cos(a);
     panR[w] = Math.sin(a);
   });
