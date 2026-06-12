@@ -922,7 +922,10 @@ export default function Editor() {
       for (let i = 0; i < n; i++) {
         grids.push(gridFromCanvasColor(compositeFrameToCanvas(i), 128, 64));
       }
-      const [L, R] = synthSpectroColor(grids, frameDur, sampleRate);
+      const [L, R] = synthSpectroColor(grids, frameDur, sampleRate, {
+        freqs: bandFreqs(64),
+        gamma: soundTuningRef.current.gamma,
+      });
       return { channels: [L, R], sampleRate };
     }
     const grids = [];
@@ -1187,12 +1190,17 @@ export default function Editor() {
           }
         }
         const now = ctx2.currentTime;
+        const tun = soundTuningRef.current;
+        const atk = Math.max(0.004, tun.smooth / 1000);
+        const rel = atk * 2.5;
         for (let w = 0; w < 4; w++) {
           for (let r = 0; r < LIVE_ROWS; r++) {
-            const a = amps[w * LIVE_ROWS + r];
             const k = w * LIVE_ROWS + r;
-            if (Math.abs(a - chain.lastAmps[k]) > 0.004) {
-              chain.gains[w][r].gain.setTargetAtTime(a, now, 0.02);
+            const lin = amps[k];
+            const a = tun.gamma === 1 ? lin : Math.pow(lin, tun.gamma);
+            const prev = chain.lastAmps[k];
+            if (Math.abs(a - prev) > 0.004) {
+              chain.gains[w][r].gain.setTargetAtTime(a, now, a > prev ? atk : rel);
               chain.lastAmps[k] = a;
             }
           }
@@ -1425,6 +1433,77 @@ export default function Editor() {
     }
   }
 
+  // ---- 🎛 RÉGLAGES SON — musical subtlety controls ----
+  // GAMME quantizes the 64 bands onto a musical scale (everything the
+  // optical readers see becomes harmonious); CONTRASTE shapes the
+  // ink→amplitude curve; ENVELOPPE sets attack/release smoothing;
+  // ESPACE is a convolution reverb wet amount.
+  const SCALES: Record<string, number[] | null> = {
+    libre: null, // continuous log spacing (historic behavior)
+    majeure: [0, 2, 4, 5, 7, 9, 11],
+    mineure: [0, 2, 3, 5, 7, 8, 10],
+    penta: [0, 2, 4, 7, 9],
+    blues: [0, 3, 5, 6, 7, 10],
+  };
+  const NOTE_NAMES = ["DO", "DO#", "RÉ", "RÉ#", "MI", "FA", "FA#", "SOL", "SOL#", "LA", "LA#", "SI"];
+  type SoundTuning = { scale: keyof typeof SCALES; root: number; gamma: number; smooth: number; space: number };
+  const [soundTuning, setSoundTuning] = useState<SoundTuning>(() => {
+    try {
+      const s = JSON.parse(localStorage.getItem("dpaint-sound-tuning") || "null");
+      if (s && typeof s === "object") return { scale: "libre", root: 0, gamma: 1.6, smooth: 14, space: 25, ...s };
+    } catch { /* defaults */ }
+    return { scale: "libre", root: 0, gamma: 1.6, smooth: 14, space: 25 };
+  });
+  const soundTuningRef = useRef(soundTuning);
+  useEffect(() => {
+    soundTuningRef.current = soundTuning;
+    try { localStorage.setItem("dpaint-sound-tuning", JSON.stringify(soundTuning)); } catch { /* noop */ }
+  }, [soundTuning]);
+  const [showSoundSettings, setShowSoundSettings] = useState(false);
+
+  // Per-band frequencies (row 0 = top = highest), honoring the scale.
+  function bandFreqs(rows: number): Float32Array {
+    const out = new Float32Array(rows);
+    const intervals = SCALES[soundTuningRef.current.scale];
+    if (!intervals) {
+      for (let r = 0; r < rows; r++) {
+        const frac = r / (rows - 1);
+        out[r] = 4186.01 * Math.pow(65.41 / 4186.01, frac);
+      }
+      return out;
+    }
+    // Build the scale's notes from C2 (MIDI 36) + root, up to C8 (108)
+    const root = soundTuningRef.current.root;
+    const midis: number[] = [];
+    for (let oct = 0; oct <= 6; oct++) {
+      for (const s of intervals) {
+        const m = 36 + root + oct * 12 + s;
+        if (m <= 108) midis.push(m);
+      }
+    }
+    const freqs = midis.map(m => 440 * Math.pow(2, (m - 69) / 12));
+    for (let r = 0; r < rows; r++) {
+      // row 0 = top = highest note
+      const idx = Math.round((1 - r / (rows - 1)) * (freqs.length - 1));
+      out[r] = freqs[idx];
+    }
+    return out;
+  }
+
+  // Generated impulse response for the ESPACE reverb (decaying noise).
+  function makeImpulse(actx: AudioContext, seconds = 2.2, decay = 2.8): AudioBuffer {
+    const rate = actx.sampleRate;
+    const len = Math.floor(seconds * rate);
+    const buf = actx.createBuffer(2, len, rate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) {
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+      }
+    }
+    return buf;
+  }
+
   // ---- SPECTRO LIVE — real-time optical synthesizer ----
   // Four banks of 64 oscillators (sine / saw / triangle / square — native
   // band-limited Web Audio types), one per pitch band per timbre. The
@@ -1437,13 +1516,7 @@ export default function Editor() {
   const [liveSound, setLiveSound] = useState(false);
   const liveSoundRef = useRef(false);
   useEffect(() => { liveSoundRef.current = liveSound; }, [liveSound]);
-  const liveChainRef = useRef<{
-    oscs: OscillatorNode[][];   // [wave][band]
-    gains: GainNode[][];        // [wave][band]
-    master: GainNode;
-    comp: DynamicsCompressorNode;
-    lastAmps: Float32Array;     // wave*LIVE_ROWS + band
-  } | null>(null);
+  const liveChainRef = useRef<LiveChain | null>(null);
   const liveGridsRef = useRef<Map<number, ColorGrid>>(new Map());
   const liveStartRef = useRef(0);
   const liveRafRef = useRef<number | null>(null);
@@ -1464,13 +1537,28 @@ export default function Editor() {
     gains: GainNode[][];
     master: GainNode;
     comp: DynamicsCompressorNode;
+    dry: GainNode;
+    wet: GainNode;
     lastAmps: Float32Array;
   };
   function buildLiveChain(actx: AudioContext): LiveChain {
     const comp = actx.createDynamicsCompressor(); // soft-limits dense input
     const master = actx.createGain();
     master.gain.value = 0.22;
-    master.connect(comp);
+    // ESPACE: master splits into a dry path and a convolution-reverb wet
+    // path, both into the compressor. Wet amount is live-adjustable.
+    const space = soundTuningRef.current.space / 100;
+    const dry = actx.createGain();
+    dry.gain.value = 1 - space * 0.5;
+    const wet = actx.createGain();
+    wet.gain.value = space;
+    const conv = actx.createConvolver();
+    conv.buffer = makeImpulse(actx);
+    master.connect(dry);
+    dry.connect(comp);
+    master.connect(conv);
+    conv.connect(wet);
+    wet.connect(comp);
     comp.connect(actx.destination);
     if (recAudioDestRef.current) {
       try { comp.connect(recAudioDestRef.current); } catch { /* noop */ }
@@ -1489,12 +1577,13 @@ export default function Editor() {
       panner.connect(master);
       const wOscs: OscillatorNode[] = [];
       const wGains: GainNode[] = [];
+      const freqs = bandFreqs(LIVE_ROWS);
       for (let r = 0; r < LIVE_ROWS; r++) {
-        const frac = r / (LIVE_ROWS - 1);
-        const f = 4186.01 * Math.pow(65.41 / 4186.01, frac); // C8 (top) → C2 (bottom)
         const osc = actx.createOscillator();
         osc.type = LIVE_WAVES[w];
-        osc.frequency.value = f;
+        osc.frequency.value = freqs[r];
+        // Human micro-detune (±4 cents) — kills electric-organ sterility
+        osc.detune.value = (Math.random() - 0.5) * 8;
         const g = actx.createGain();
         g.gain.value = 0;
         osc.connect(g);
@@ -1506,8 +1595,27 @@ export default function Editor() {
       oscs.push(wOscs);
       gains.push(wGains);
     }
-    return { oscs, gains, master, comp, lastAmps: new Float32Array(LIVE_WAVES.length * LIVE_ROWS) };
+    return { oscs, gains, master, comp, dry, wet, lastAmps: new Float32Array(LIVE_WAVES.length * LIVE_ROWS) };
   }
+
+  // Live re-tune + reverb amount: scale/root changes glissando the
+  // running oscillators; ESPACE adjusts wet/dry without rebuild.
+  useEffect(() => {
+    const actx = audioCtxRef.current;
+    if (!actx) return;
+    const now = actx.currentTime;
+    const freqs = bandFreqs(LIVE_ROWS);
+    for (const chain of [liveChainRef.current, cameraChainRef.current]) {
+      if (!chain) continue;
+      chain.oscs.forEach(bank => bank.forEach((o, r) => {
+        try { o.frequency.setTargetAtTime(freqs[r], now, 0.06); } catch { /* noop */ }
+      }));
+      const space = soundTuning.space / 100;
+      try { chain.wet.gain.setTargetAtTime(space, now, 0.05); } catch { /* noop */ }
+      try { chain.dry.gain.setTargetAtTime(1 - space * 0.5, now, 0.05); } catch { /* noop */ }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [soundTuning.scale, soundTuning.root, soundTuning.space]);
 
   function teardownLiveChain(chain: LiveChain) {
     const actx = audioCtxRef.current;
@@ -1546,6 +1654,9 @@ export default function Editor() {
       const grid = getLiveGrid(fi);
       const waveArrs = [grid.sine, grid.saw, grid.tri, grid.sqr];
       const now = ctx2.currentTime;
+      const tun = soundTuningRef.current;
+      const atk = Math.max(0.004, tun.smooth / 1000);
+      const rel = atk * 2.5; // longer release than attack — natural decay
       for (let w = 0; w < waveArrs.length; w++) {
         const arr = waveArrs[w];
         const wGains = chain.gains[w];
@@ -1553,9 +1664,11 @@ export default function Editor() {
         for (let r = 0; r < LIVE_ROWS; r++) {
           const a0 = arr[r * LIVE_COLS + c0];
           const a1 = arr[r * LIVE_COLS + c1];
-          const a = a0 + (a1 - a0) * ct;
-          if (Math.abs(a - chain.lastAmps[base + r]) > 0.004) {
-            wGains[r].gain.setTargetAtTime(a, now, 0.012);
+          const lin = a0 + (a1 - a0) * ct;
+          const a = tun.gamma === 1 ? lin : Math.pow(lin, tun.gamma);
+          const prev = chain.lastAmps[base + r];
+          if (Math.abs(a - prev) > 0.004) {
+            wGains[r].gain.setTargetAtTime(a, now, a > prev ? atk : rel);
             chain.lastAmps[base + r] = a;
           }
         }
@@ -3956,6 +4069,73 @@ export default function Editor() {
       {/* SPLASH */}
       {splashOpen && <SplashScreen theme={t} onDismiss={() => setSplashOpen(false)} />}
 
+      {/* 🎛 RÉGLAGES SON — floating tuning panel */}
+      {showSoundSettings && (
+        <div style={{
+          position: "fixed", left: 16, bottom: 16, zIndex: 8000,
+          background: t.panel, border: `1px solid ${t.border}`,
+          padding: 10, width: 280, color: t.panelText,
+          fontFamily: "'VT323', monospace", fontSize: 13,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontWeight: "bold", fontSize: 15, flex: 1 }}>🎛 RÉGLAGES SON</span>
+            <button className="amiga-button" onClick={() => setShowSoundSettings(false)} style={{ padding: "0 8px" }}>×</button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ minWidth: 78 }}>GAMME</span>
+              <select
+                value={soundTuning.scale}
+                onChange={e => setSoundTuning(s => ({ ...s, scale: e.target.value as keyof typeof SCALES }))}
+                style={{ flex: 1, fontFamily: "inherit", background: t.panel, color: t.panelText, border: `1px solid ${t.border}` }}
+              >
+                <option value="libre">LIBRE (continu)</option>
+                <option value="majeure">MAJEURE</option>
+                <option value="mineure">MINEURE</option>
+                <option value="penta">PENTATONIQUE</option>
+                <option value="blues">BLUES</option>
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, opacity: soundTuning.scale === "libre" ? 0.45 : 1 }}>
+              <span style={{ minWidth: 78 }}>TONIQUE</span>
+              <select
+                value={soundTuning.root}
+                disabled={soundTuning.scale === "libre"}
+                onChange={e => setSoundTuning(s => ({ ...s, root: Number(e.target.value) }))}
+                style={{ flex: 1, fontFamily: "inherit", background: t.panel, color: t.panelText, border: `1px solid ${t.border}` }}
+              >
+                {NOTE_NAMES.map((nn, i) => <option key={nn} value={i}>{nn}</option>)}
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ minWidth: 78 }}>CONTRASTE</span>
+              <input type="range" min={5} max={30} value={Math.round(soundTuning.gamma * 10)}
+                onChange={e => setSoundTuning(s => ({ ...s, gamma: Number(e.target.value) / 10 }))}
+                style={{ flex: 1, accentColor: t.accent }} />
+              <span style={{ minWidth: 28, fontVariantNumeric: "tabular-nums" }}>{soundTuning.gamma.toFixed(1)}</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ minWidth: 78 }}>ENVELOPPE</span>
+              <input type="range" min={5} max={150} value={soundTuning.smooth}
+                onChange={e => setSoundTuning(s => ({ ...s, smooth: Number(e.target.value) }))}
+                style={{ flex: 1, accentColor: t.accent }} />
+              <span style={{ minWidth: 38, fontVariantNumeric: "tabular-nums" }}>{soundTuning.smooth}ms</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ minWidth: 78 }}>ESPACE</span>
+              <input type="range" min={0} max={100} value={soundTuning.space}
+                onChange={e => setSoundTuning(s => ({ ...s, space: Number(e.target.value) }))}
+                style={{ flex: 1, accentColor: t.accent }} />
+              <span style={{ minWidth: 32, fontVariantNumeric: "tabular-nums" }}>{soundTuning.space}%</span>
+            </label>
+            <div style={{ fontSize: 11, opacity: 0.6, lineHeight: 1.25 }}>
+              Gamme &amp; espace agissent en direct sur LIVE/CAMÉRA · contraste &amp; enveloppe au prochain passage de la tête.
+              {soundTuning.scale !== "libre" && " Changer de gamme en cours de lecture = glissando !"}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 📷 LECTEUR OPTIQUE — floating camera panel with scan line */}
       {cameraReader && (
         <div style={{
@@ -4114,6 +4294,7 @@ export default function Editor() {
         <MenuDropdown label="SON" items={[
           { label: liveSound ? "🎹 SPECTRO LIVE — ARRÊTER ✓" : "🎹 SPECTRO LIVE — le son suit le dessin en direct", action: () => (liveSound ? stopLiveSound() : startLiveSound()) },
           { label: cameraReader ? "📷 LECTEUR OPTIQUE — ARRÊTER ✓" : "📷 LECTEUR OPTIQUE — joue la tapisserie avec la caméra", action: () => (cameraReader ? stopCameraReader() : void startCameraReader()) },
+          { label: showSoundSettings ? "🎛 RÉGLAGES SON — FERMER ✓" : "🎛 RÉGLAGES SON (gamme, contraste, espace…)", action: () => setShowSoundSettings(v => !v) },
           { label: voicesOn ? "🗣 VOIX (textes lus) — ON ✓" : "🗣 VOIX (textes lus) — OFF", action: () => setVoicesOn(v => !v) },
           { label: "🗑 EFFACER LES VOIX (textes mémorisés)", action: () => { if (confirm(`Effacer ${textStampsRef.current.length} texte(s) de la timeline vocale ?`)) textStampsRef.current = []; } },
           { label: "—", action: () => {} },

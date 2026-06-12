@@ -301,13 +301,18 @@ function waveValue(w: number, p: number): number {
 const TWO_PI = Math.PI * 2;
 
 // Color-aware additive synthesis → STEREO pair [left, right].
+// opts.freqs: per-band frequencies (row 0 = top); defaults to log C2→C8.
+// opts.gamma: amplitude response curve (>1 = more contrast, faint marks
+// whisper / bold marks roar).
 export function synthSpectroColor(
   grids: ColorGrid[],
   frameDur: number,
   sampleRate = 44100,
-  fMin = 65.41,
-  fMax = 4186.01,
+  opts: { freqs?: ArrayLike<number>; gamma?: number; fMin?: number; fMax?: number } = {},
 ): [Float32Array, Float32Array] {
+  const fMin = opts.fMin ?? 65.41;
+  const fMax = opts.fMax ?? 4186.01;
+  const gamma = opts.gamma ?? 1;
   const frameSamples = Math.max(1, Math.round(frameDur * sampleRate));
   const total = Math.max(1, grids.length * frameSamples);
   const L = new Float32Array(total);
@@ -318,8 +323,16 @@ export function synthSpectroColor(
 
   const omega = new Float32Array(rows);
   for (let r = 0; r < rows; r++) {
-    const frac = r / (rows - 1);
-    omega[r] = (TWO_PI * fMax * Math.pow(fMin / fMax, frac)) / sampleRate;
+    let f: number;
+    if (opts.freqs && opts.freqs.length >= rows) {
+      f = opts.freqs[r];
+    } else {
+      const frac = r / (rows - 1);
+      f = fMax * Math.pow(fMin / fMax, frac);
+    }
+    // Human micro-detune (±0.15%) — removes electric-organ sterility
+    f *= 1 + (Math.random() - 0.5) * 0.003;
+    omega[r] = (TWO_PI * f) / sampleRate;
   }
   // Independent phase per (wave, band)
   const phases = [0, 1, 2, 3].map(() => {
@@ -354,12 +367,14 @@ export function synthSpectroColor(
         const trim = trims[w];
         const gL = panL[w], gR = panR[w];
         for (let r = 0; r < rows; r++) {
-          const a0 = arr[r * cols + col];
-          const a1 = arr[r * cols + colNext];
-          if (a0 < EPS && a1 < EPS) {
+          const raw0 = arr[r * cols + col];
+          const raw1 = arr[r * cols + colNext];
+          if (raw0 < EPS && raw1 < EPS) {
             ph[r] = (ph[r] + omega[r] * blockLen) % TWO_PI;
             continue;
           }
+          const a0 = gamma === 1 ? raw0 : Math.pow(raw0, gamma);
+          const a1 = gamma === 1 ? raw1 : Math.pow(raw1, gamma);
           let p = ph[r];
           const om = omega[r];
           const da = (a1 - a0) / blockLen;
