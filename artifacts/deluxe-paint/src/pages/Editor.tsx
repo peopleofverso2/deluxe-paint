@@ -4970,11 +4970,15 @@ function MenuDropdown({ label, items }: { label: string; items: { label: string;
 
   useEffect(() => {
     if (!open) return;
-    function handle(e: MouseEvent) {
+    function handle(e: MouseEvent | TouchEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     }
     document.addEventListener("mousedown", handle);
-    return () => document.removeEventListener("mousedown", handle);
+    document.addEventListener("touchstart", handle);
+    return () => {
+      document.removeEventListener("mousedown", handle);
+      document.removeEventListener("touchstart", handle);
+    };
   }, [open]);
 
   return (
@@ -4987,7 +4991,22 @@ function MenuDropdown({ label, items }: { label: string; items: { label: string;
         {label}
       </button>
       {open && (
-        <div className="amiga-panel" style={{ position: "absolute", top: "100%", left: 0, zIndex: 100, minWidth: 200 }}>
+        <div
+          className="amiga-panel"
+          style={{
+            position: "absolute",
+            top: "100%",
+            left: 0,
+            zIndex: 100,
+            minWidth: 200,
+            maxWidth: "min(320px, 90vw)",
+            // Long menus (IMAGE has 17+ entries) must scroll instead of
+            // running off the bottom of the viewport
+            maxHeight: "min(70vh, 560px)",
+            overflowY: "auto",
+            WebkitOverflowScrolling: "touch",
+          }}
+        >
           {items.map(item => (
             <button
               key={item.label}
