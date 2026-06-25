@@ -40,9 +40,9 @@ else
   echo "==> Skipping build (--restart): will pull the existing :latest."
 fi
 
-echo "==> Pulling + restarting the container on $VM…"
+echo "==> Pulling + restarting the container on ${VM}..."
 gcloud compute ssh "$VM" --project "$VM_PROJECT" --zone "$VM_ZONE" --tunnel-through-iap \
-  --command="cd $COMPOSE_DIR && sudo docker compose pull $COMPOSE_SVC && sudo docker compose up -d $COMPOSE_SVC && sudo docker image prune -f >/dev/null 2>&1 || true"
+  --command="cd $COMPOSE_DIR && docker compose pull $COMPOSE_SVC && docker compose up -d $COMPOSE_SVC && docker image prune -f >/dev/null 2>&1 || true"
 
 echo "==> Verifying…"
 sleep 3
